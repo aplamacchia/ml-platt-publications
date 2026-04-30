@@ -1,0 +1,60 @@
+name: Update publications
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Runs daily at 06:23 UTC.
+    # Change this if you enjoy cron arithmetic, humanity's least necessary rite of passage.
+    - cron: "23 6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-publications
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate publications.json
+        env:
+          CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
+          TARGET_AUTHOR: "Michael L. Platt"
+          TARGET_ORCID: "0000-0003-3912-8821"
+          OUTPUT_FILE: "publications.json"
+        run: python scripts/update_publications.py
+
+      - name: Validate JSON
+        run: python -m json.tool publications.json > /tmp/publications.json
+
+      - name: Commit and push changes
+        run: |
+          if git diff --quiet -- publications.json; then
+            echo "No publication changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add publications.json
+          git commit -m "Update publications.json"
+          git push
