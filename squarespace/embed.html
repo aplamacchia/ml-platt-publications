@@ -1,0 +1,308 @@
+<!--
+Squarespace Code Block for Michael L. Platt publications.
+
+Before publishing:
+1. Replace YOUR_GITHUB_USERNAME.
+2. Replace YOUR_REPO_NAME.
+3. Make sure GitHub Pages is enabled for the repo.
+-->
+
+<section id="ml-platt-publications" aria-labelledby="ml-platt-publications-heading">
+  <h2 id="ml-platt-publications-heading" class="pub-heading">Publications</h2>
+  <div class="pub-loading" role="status">Loading publications...</div>
+</section>
+
+<style>
+  #ml-platt-publications {
+    --pub-border: #d8d8d8;
+    --pub-muted: #666;
+    --pub-bg-soft: #fafafa;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  #ml-platt-publications .pub-heading {
+    margin: 0 0 20px 0;
+  }
+
+  #ml-platt-publications .pub-toolbar {
+    display: grid;
+    grid-template-columns: 1fr minmax(140px, 220px);
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  #ml-platt-publications .pub-search,
+  #ml-platt-publications .pub-year {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 12px 14px;
+    font: inherit;
+    border: 1px solid var(--pub-border);
+    border-radius: 8px;
+    background: #fff;
+  }
+
+  #ml-platt-publications .pub-meta {
+    margin: 0 0 16px 0;
+    font-size: 0.95rem;
+    color: var(--pub-muted);
+  }
+
+  #ml-platt-publications .pub-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 18px;
+  }
+
+  #ml-platt-publications .pub-card {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--pub-border);
+    border-radius: 12px;
+    padding: 18px;
+    background: #fff;
+    min-height: 100%;
+    box-sizing: border-box;
+  }
+
+  #ml-platt-publications .pub-title {
+    margin: 0 0 10px 0;
+    font-size: 1.05rem;
+    line-height: 1.35;
+  }
+
+  #ml-platt-publications .pub-title a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  #ml-platt-publications .pub-title a:hover,
+  #ml-platt-publications .pub-title a:focus {
+    text-decoration: underline;
+  }
+
+  #ml-platt-publications .pub-line {
+    margin: 0 0 8px 0;
+    font-size: 0.95rem;
+    line-height: 1.45;
+  }
+
+  #ml-platt-publications .pub-label {
+    font-weight: 700;
+  }
+
+  #ml-platt-publications .pub-actions {
+    margin-top: auto;
+    padding-top: 14px;
+  }
+
+  #ml-platt-publications .pub-button {
+    display: inline-block;
+    padding: 10px 12px;
+    border: 1px solid #222;
+    border-radius: 8px;
+    text-decoration: none;
+    font-size: 0.92rem;
+  }
+
+  #ml-platt-publications .pub-empty,
+  #ml-platt-publications .pub-error,
+  #ml-platt-publications .pub-loading {
+    padding: 16px;
+    border: 1px solid var(--pub-border);
+    border-radius: 10px;
+    background: var(--pub-bg-soft);
+  }
+
+  @media (max-width: 640px) {
+    #ml-platt-publications .pub-toolbar {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+
+<script>
+(function () {
+  "use strict";
+
+  const root = document.getElementById("ml-platt-publications");
+
+  // GitHub Pages URL. Replace these two placeholders.
+  const DATA_URL = "https://YOUR_GITHUB_USERNAME.github.io/YOUR_REPO_NAME/publications.json";
+
+  let allPublications = [];
+
+  function escapeHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function safeUrl(value) {
+    const url = String(value == null ? "" : value).trim();
+    if (url.startsWith("https://doi.org/") || url.startsWith("https://")) {
+      return url.replace(/"/g, "%22");
+    }
+    return "#";
+  }
+
+  function getAuthors(pub) {
+    if (Array.isArray(pub.authors) && pub.authors.length) {
+      return pub.authors.join(", ");
+    }
+    return pub.authors_display || "";
+  }
+
+  function getYears(publications) {
+    const years = publications
+      .map((pub) => Number(pub.year))
+      .filter((year) => Number.isInteger(year))
+      .sort((a, b) => b - a);
+
+    return Array.from(new Set(years));
+  }
+
+  function renderShell() {
+    const years = getYears(allPublications);
+
+    root.innerHTML = `
+      <h2 id="ml-platt-publications-heading" class="pub-heading">Publications</h2>
+
+      <div class="pub-toolbar">
+        <input
+          id="pub-search"
+          class="pub-search"
+          type="search"
+          placeholder="Search by title, journal, year, DOI, or author"
+          aria-label="Search publications"
+        />
+
+        <select id="pub-year" class="pub-year" aria-label="Filter publications by year">
+          <option value="">All years</option>
+          ${years.map((year) => `<option value="${year}">${year}</option>`).join("")}
+        </select>
+      </div>
+
+      <p id="pub-meta" class="pub-meta"></p>
+      <div id="pub-results"></div>
+    `;
+  }
+
+  function renderPublications(items) {
+    const results = document.getElementById("pub-results");
+    const meta = document.getElementById("pub-meta");
+
+    meta.textContent = `${items.length} publication${items.length === 1 ? "" : "s"}`;
+
+    if (!items.length) {
+      results.innerHTML = `<div class="pub-empty">No matching publications found.</div>`;
+      return;
+    }
+
+    results.innerHTML = `
+      <div class="pub-grid">
+        ${items.map((pub) => {
+          const title = escapeHtml(pub.title || "Untitled");
+          const authors = escapeHtml(getAuthors(pub));
+          const journal = escapeHtml(pub.journal || "");
+          const year = escapeHtml(pub.year || "");
+          const doi = escapeHtml(pub.doi || "");
+          const url = safeUrl(pub.url || (pub.doi ? `https://doi.org/${pub.doi}` : "#"));
+
+          return `
+            <article class="pub-card">
+              <h3 class="pub-title">
+                <a href="${url}" target="_blank" rel="noopener noreferrer">${title}</a>
+              </h3>
+
+              ${authors ? `<p class="pub-line"><span class="pub-label">Authors:</span> ${authors}</p>` : ""}
+              ${journal ? `<p class="pub-line"><span class="pub-label">Journal:</span> ${journal}</p>` : ""}
+              ${year ? `<p class="pub-line"><span class="pub-label">Year:</span> ${year}</p>` : ""}
+              ${doi ? `<p class="pub-line"><span class="pub-label">DOI:</span> ${doi}</p>` : ""}
+
+              <div class="pub-actions">
+                <a class="pub-button" href="${url}" target="_blank" rel="noopener noreferrer">
+                  View publication
+                </a>
+              </div>
+            </article>
+          `;
+        }).join("")}
+      </div>
+    `;
+  }
+
+  function filterPublications() {
+    const searchInput = document.getElementById("pub-search");
+    const yearSelect = document.getElementById("pub-year");
+
+    const query = searchInput.value.trim().toLowerCase();
+    const selectedYear = yearSelect.value;
+
+    return allPublications.filter((pub) => {
+      const matchesYear = !selectedYear || String(pub.year || "") === selectedYear;
+
+      const haystack = [
+        pub.title || "",
+        pub.journal || "",
+        pub.publisher || "",
+        pub.year || "",
+        pub.doi || "",
+        pub.type || "",
+        pub.authors_display || "",
+        Array.isArray(pub.authors) ? pub.authors.join(" ") : ""
+      ].join(" ").toLowerCase();
+
+      const matchesQuery = !query || haystack.includes(query);
+      return matchesYear && matchesQuery;
+    });
+  }
+
+  function bindFilters() {
+    const searchInput = document.getElementById("pub-search");
+    const yearSelect = document.getElementById("pub-year");
+
+    function update() {
+      renderPublications(filterPublications());
+    }
+
+    searchInput.addEventListener("input", update);
+    yearSelect.addEventListener("change", update);
+  }
+
+  async function loadPublications() {
+    try {
+      const response = await fetch(DATA_URL, { cache: "no-store" });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (!Array.isArray(data)) {
+        throw new Error("Expected publications.json to contain an array.");
+      }
+
+      allPublications = data;
+      renderShell();
+      renderPublications(allPublications);
+      bindFilters();
+    } catch (error) {
+      root.innerHTML = `
+        <h2 id="ml-platt-publications-heading" class="pub-heading">Publications</h2>
+        <div class="pub-error">
+          Could not load publications right now.
+        </div>
+      `;
+      console.error("Publication gallery load failed:", error);
+    }
+  }
+
+  loadPublications();
+})();
+</script>

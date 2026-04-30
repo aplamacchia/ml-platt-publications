@@ -1,0 +1,4 @@
+# One DOI per line.
+# Anything listed here will be excluded even if the score is high.
+# Example:
+# 10.0000/not-the-right-michael-platt
