@@ -1,113 +1,106 @@
-# Michael L. Platt Publications Gallery
+# Platt Labs publication gallery
 
-This repo powers an auto-updating publications gallery for a Squarespace site.
+This repository generates `publications.json` for the Squarespace publication gallery.
 
-## How it works
+## Sources
 
-1. `scripts/update_publications.py` fetches publication metadata from Crossref.
-2. GitHub Actions runs the script daily and writes `publications.json`.
-3. GitHub Pages hosts `publications.json`.
-4. A Squarespace Code Block fetches that JSON and renders publication cards.
+The updater combines:
 
-## Files
+1. MyNCBI public bibliography
+   `https://www.ncbi.nlm.nih.gov/myncbi/plattlab/bibliography/public/`
 
-```text
-.github/workflows/update-publications.yml
-scripts/update_publications.py
-squarespace/embed.html
-config/doi_allowlist.txt
-config/doi_blocklist.txt
-requirements.txt
-publications.json
-```
+2. ORCID
+   `https://orcid.org/0000-0003-3912-8821`
 
-## First setup
+3. PubMed E-utilities enrichment for PMIDs found in MyNCBI
 
-### 1. Create the GitHub repository
+4. Crossref DOI enrichment for DOIs found in MyNCBI, ORCID, PubMed, and manual seed files
 
-Create a public GitHub repository, then add these files.
+5. Optional Google Scholar/manual reconciliation files:
+   - `config/google_scholar_dois.txt`
+   - `config/manual_publications.json`
 
-### 2. Add a repository secret
+Google Scholar is not scraped automatically because it has no stable official public API for this use case and automated requests often hit CAPTCHA/anti-bot responses. Use the seed files when Scholar reveals a missing item.
 
-In GitHub:
+## GitHub secret
 
-Settings → Secrets and variables → Actions → New repository secret
-
-Name:
+The workflow expects this repository secret:
 
 ```text
 CROSSREF_MAILTO
 ```
 
-Value:
+Use a real email address. It is used for Crossref polite API contact and as the NCBI email value.
 
-```text
-your-real-email@example.com
-```
-
-Crossref recommends identifying yourself for polite API access.
-
-### 3. Enable GitHub Pages
+## Running the updater manually
 
 In GitHub:
 
-Settings → Pages → Build and deployment → Source: Deploy from a branch
+```text
+Actions -> Update publications -> Run workflow
+```
 
-Use:
+After it completes, check:
 
 ```text
-Branch: main
-Folder: /root
+publications.json
+publication_update_report.json
 ```
 
-Your JSON URL will be:
+## Adding missing items from Google Scholar
+
+If Google Scholar shows a paper missing from the site:
+
+1. Find the DOI.
+2. Add it to `config/google_scholar_dois.txt`.
+3. Commit the change.
+4. Run the workflow.
+
+If the item has no DOI, add it manually to `config/manual_publications.json`.
+
+Example:
+
+```json
+[
+  {
+    "title": "Example paper title",
+    "authors": ["Michael L. Platt", "Jane Doe"],
+    "journal": "Example Journal",
+    "year": 2025,
+    "url": "https://example.com/article",
+    "thumbnail_url": ""
+  }
+]
+```
+
+## Squarespace
+
+Squarespace should not need changes as long as it fetches:
 
 ```text
-https://YOUR_GITHUB_USERNAME.github.io/YOUR_REPO_NAME/publications.json
+https://aplamacchia.github.io/ml-platt-publications/publications.json
 ```
 
-### 4. Run the workflow once
+This updater preserves the same JSON shape used by the current front-end.
 
-Actions → Update publications → Run workflow
 
-After it finishes, open the JSON URL above in your browser.
+## v3 quality fixes
 
-### 5. Add the Squarespace block
+This update adds stricter Michael L. Platt author gating, normalizes bioRxiv/preprint records, strips publisher XML tags from titles before deduplication, supports PMID blocklisting, and corrects known abbreviated author display issues such as PrimateFace.
 
-Open `squarespace/embed.html`.
-
-Replace:
+New optional config files:
 
 ```text
-YOUR_GITHUB_USERNAME
-YOUR_REPO_NAME
+config/pmid_blocklist.txt
+config/author_aliases.json
 ```
 
-Paste the whole file into a Squarespace Code Block on the publications page.
 
-## Managing false positives
+## v4 note: bioRxiv/openRxiv normalization
 
-If a wrong paper appears, add its DOI to:
+Records with legacy bioRxiv DOIs (`10.1101/...`) and newer openRxiv DOIs (`10.64898/...`) are normalized as preprints. For Platt Lab records where Crossref returns `publisher=openRxiv`, `type=posted-content`, and an empty journal field, the generated JSON now uses `journal: "bioRxiv"` and `type: "preprint"` so the Squarespace card does not fall back to a generic "Research Article" label.
 
-```text
-config/doi_blocklist.txt
-```
 
-If a correct paper is missing but Crossref returns it with weak metadata, add its DOI to:
+## Author list strategy
 
-```text
-config/doi_allowlist.txt
-```
-
-Commit the change and rerun the workflow.
-
-## Local test
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-export CROSSREF_MAILTO="your-real-email@example.com"
-python scripts/update_publications.py
-python -m json.tool publications.json
-```
+The updater deliberately keeps a single best author list per publication rather than unioning names from every metadata source. PubMed, MyNCBI, Crossref, and ORCID often provide the same authors in different forms, such as `Platt ML`, `Michael L Platt`, and `Michael L. Platt`. Unioning those lists creates duplicate or broken displays. The script now scores each source's author list, removes obvious fragments like `Michael L` when `Michael L. Platt` is present, and keeps the cleanest complete list.
