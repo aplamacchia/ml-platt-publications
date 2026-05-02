@@ -2,3 +2,6 @@
 # The updater will fetch full metadata for these through Crossref.
 # Example:
 # 10.1038/s41586-024-07178-6
+
+# Mid-superior temporal sulcus encodes spatial context and behavioral state in freely moving macaques
+10.64898/2026.04.16.719074
