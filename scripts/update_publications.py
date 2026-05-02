@@ -80,6 +80,10 @@ AUTHOR_NAME_CORRECTIONS = {
     "kording k": "Konrad P. Kording",
     "platt m": "Michael L. Platt",
     "platt ml": "Michael L. Platt",
+    "michael l platt": "Michael L. Platt",
+    "michael platt": "Michael L. Platt",
+    "rennie sm": "Scott M. Rennie",
+    "scott m rennie": "Scott M. Rennie",
 }
 
 PRIMATEFACE_AUTHORS = [
@@ -245,32 +249,151 @@ def titles_compatible(a: "Pub", b: "Pub") -> bool:
     overlap = len(a_words & b_words) / max(1, min(len(a_words), len(b_words)))
     return overlap >= 0.78
 
+def load_author_name_corrections() -> Dict[str, str]:
+    """Load built-in and optional config/author_aliases.json corrections."""
+    corrections = dict(AUTHOR_NAME_CORRECTIONS)
+    path = CONFIG_DIR / "author_aliases.json"
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for raw, corrected in data.items():
+                    corrections[norm_title(raw)] = clean(corrected)
+        except Exception as exc:
+            warn(f"Could not read {path}: {exc}")
+    return corrections
+
 def clean_author(value: Any) -> str:
     value = clean(value).strip(" .;,:")
+    value = re.sub(r"\s*,\s*", ", ", value)
+    value = re.sub(r"\s+", " ", value)
     key = norm_title(value)
-    return AUTHOR_NAME_CORRECTIONS.get(key, value)
+    return load_author_name_corrections().get(key, value)
+
+def author_initials_from_tokens(tokens: Sequence[str]) -> str:
+    initials = []
+    for token in tokens:
+        pieces = [p for p in re.split(r"[^a-z0-9]+", token.lower()) if p]
+        for piece in pieces:
+            if piece:
+                initials.append(piece[0])
+    return "".join(initials)
+
+def author_key(value: Any) -> str:
+    """Canonical person key for merging 'Rennie SM' with 'Scott M. Rennie'.
+
+    This is intentionally conservative. It keys a person as family-name + initials
+    when the string looks like a human name, and falls back to normalized text for
+    group authors such as Cayo Biobank Research Unit.
+    """
+    author = clean_author(value)
+    raw = author.lower().replace(".", "")
+    raw = raw.replace("\u00a0", " ")
+    raw = re.sub(r"\s+", " ", raw).strip(" ,;:")
+    if not raw:
+        return ""
+
+    # Surname, Given Middle
+    if "," in raw:
+        family, rest = [part.strip() for part in raw.split(",", 1)]
+        family = norm_title(family)
+        initials = author_initials_from_tokens(norm_title(rest).split())
+        return f"{family}|{initials}" if family and initials else norm_title(raw)
+
+    tokens = norm_title(raw).split()
+    if not tokens:
+        return ""
+    if len(tokens) == 1:
+        return tokens[0]
+
+    # Group/consortium authors should not be mangled into fake surname keys.
+    group_words = {"unit", "group", "consortium", "collaboration", "committee", "team", "network", "initiative", "project", "biobank", "research"}
+    if len(tokens) >= 3 and any(word in tokens for word in group_words):
+        return "group|" + " ".join(tokens)
+
+    last = tokens[-1]
+
+    # Surname-first shorthand: Platt ML, Rennie SM, Regla Vargas A, Brent LJN.
+    if re.fullmatch(r"[a-z]{1,4}", last) and len(last) <= 4 and not any(len(t) > 1 for t in tokens[1:-1]):
+        family = " ".join(tokens[:-1])
+        return f"{family}|{last}"
+
+    # Surname-first shorthand with compound surname: Negron Del Valle JE.
+    if re.fullmatch(r"[a-z]{1,4}", last) and len(tokens) >= 3:
+        likely_initials = last
+        likely_family = " ".join(tokens[:-1])
+        # Treat as surname-first only when the leading tokens do not look like
+        # ordinary given names plus family names. This is not perfect, because names
+        # are chaos wearing conference badges, but it catches PubMed abbreviations.
+        if all(len(t) > 1 for t in tokens[:-1]):
+            return f"{likely_family}|{likely_initials}"
+
+    # Given Middle Family. Preserve hyphenated last names as one family unit
+    # before norm_title splits them: Alba Motes-Rodrigo -> motes rodrigo|a.
+    raw_words = raw.split()
+    if raw_words and "-" in raw_words[-1] and len(tokens) >= 3:
+        family_tokens = norm_title(raw_words[-1]).split()
+        family = " ".join(family_tokens)
+        initials = author_initials_from_tokens(tokens[:-len(family_tokens)])
+        return f"{family}|{initials}" if family and initials else norm_title(raw)
+
+    family = tokens[-1]
+    initials = author_initials_from_tokens(tokens[:-1])
+    return f"{family}|{initials}" if initials else norm_title(raw)
+
+def author_display_quality(value: Any) -> float:
+    author = clean_author(value)
+    tokens = norm_title(author).split()
+    if not author:
+        return -100.0
+
+    score = 0.0
+    score += min(len(author), 40) / 10.0
+    score += 4.0 if len(tokens) >= 2 else 0.0
+    score += 3.0 if len(tokens) >= 3 else 0.0
+    score += 2.0 if "." in author else 0.0
+    score -= 4.0 if re.fullmatch(r"[A-Za-z .-]+", author) and len(tokens) == 2 and len(tokens[-1]) <= 4 and tokens[-1].replace(".", "").isupper() else 0.0
+    score -= 2.0 if author.endswith(".") and len(tokens) <= 2 else 0.0
+    return score
 
 def uniq(values: Iterable[str]) -> List[str]:
-    seen, out = set(), []
+    order: List[str] = []
+    best_by_key: Dict[str, str] = {}
+
     for value in values:
-        value = clean_author(value)
-        if value and value.lower() not in seen:
-            seen.add(value.lower())
-            out.append(value)
-    return out
+        cleaned = clean_author(value)
+        if not cleaned:
+            continue
+
+        key = author_key(cleaned) or cleaned.lower()
+        if key not in best_by_key:
+            order.append(key)
+            best_by_key[key] = cleaned
+            continue
+
+        current = best_by_key[key]
+        if author_display_quality(cleaned) > author_display_quality(current):
+            best_by_key[key] = cleaned
+
+    return [best_by_key[key] for key in order if best_by_key.get(key)]
 
 def author_list_quality(authors: Sequence[str]) -> float:
     score = 0.0
     for author in authors:
-        n = norm_title(clean_author(author))
+        cleaned = clean_author(author)
+        n = norm_title(cleaned)
         tokens = n.split()
         if len(tokens) >= 2:
             score += 1
+        if len(tokens) >= 3:
+            score += 2
         if tokens and len(tokens[0]) > 1 and tokens[0] not in {"m", "ml", "a", "f", "j", "k"}:
             score += 2
-        if len(clean_author(author)) >= 12:
+        if len(cleaned) >= 12:
             score += 1
-    return score + len(authors) * 0.1
+        if "." in cleaned:
+            score += 0.5
+    return score + len(uniq(authors)) * 0.1
 
 def merge_authors(existing: Sequence[str], incoming: Sequence[str]) -> List[str]:
     existing_u = uniq(existing)
@@ -279,6 +402,9 @@ def merge_authors(existing: Sequence[str], incoming: Sequence[str]) -> List[str]
         return incoming_u
     if not incoming_u:
         return existing_u
+
+    # Prefer the richer list first, but canonical de-duplication prevents the
+    # PubMed/Crossref/MyNCBI triple-author parade.
     if author_list_quality(incoming_u) > author_list_quality(existing_u) + 2:
         return uniq(list(incoming_u) + list(existing_u))
     return uniq(list(existing_u) + list(incoming_u))
