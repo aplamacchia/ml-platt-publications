@@ -1,591 +1,603 @@
 #!/usr/bin/env python3
 """
-Fetch Michael L. Platt publications from Crossref and write publications.json.
-
-Default behavior:
-- Uses Michael L. Platt's ORCID as the strongest match signal.
-- Falls back to name variants because academic metadata is a haunted filing cabinet.
-- Deduplicates by DOI.
-- Applies neuroscience/affiliation scoring to reduce false positives.
-- Supports manual DOI allowlist/blocklist files.
-
-Required environment variable:
-- CROSSREF_MAILTO: your email address for Crossref polite API access.
-
-Optional environment variables:
-- TARGET_AUTHOR: default "Michael L. Platt"
-- TARGET_ORCID: default "0000-0003-3912-8821"
-- OUTPUT_FILE: default "publications.json"
-- ROWS_PER_PAGE: default "100"
-- MAX_PAGES_PER_QUERY: default "3"
-- MIN_NAME_FALLBACK_SCORE: default "130"
-- WRITE_DEBUG: "1" to also write publications.debug.json
+Build publications.json for the Platt Labs Squarespace gallery.
+Sources: MyNCBI public bibliography, ORCID, PubMed E-utilities, Crossref, and manual/Google Scholar seed files.
+Google Scholar is not scraped automatically because GitHub Actions routinely hits CAPTCHA/anti-bot pages.
 """
-
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
 import sys
 import time
+import unicodedata
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import requests
+from bs4 import BeautifulSoup
 
-
-# -------------------------
-# Configuration
-# -------------------------
-
-TARGET_AUTHOR = os.getenv("TARGET_AUTHOR", "Michael L. Platt").strip()
-TARGET_ORCID = os.getenv("TARGET_ORCID", "0000-0003-3912-8821").strip()
-CROSSREF_MAILTO = os.getenv("CROSSREF_MAILTO", "").strip()
-
+TARGET_AUTHOR = os.getenv("TARGET_AUTHOR", "Michael L. Platt")
+TARGET_ORCID = os.getenv("TARGET_ORCID", "0000-0003-3912-8821")
+MYNCBI_PUBLIC_URL = os.getenv("MYNCBI_PUBLIC_URL", "https://www.ncbi.nlm.nih.gov/myncbi/plattlab/bibliography/public/")
+GOOGLE_SCHOLAR_PROFILE_URL = os.getenv("GOOGLE_SCHOLAR_PROFILE_URL", "https://scholar.google.com/citations?user=U9Hu2rcAAAAJ&hl=en")
 OUTPUT_FILE = Path(os.getenv("OUTPUT_FILE", "publications.json"))
-DEBUG_OUTPUT_FILE = Path(os.getenv("DEBUG_OUTPUT_FILE", "publications.debug.json"))
+REPORT_FILE = Path(os.getenv("REPORT_FILE", "publication_update_report.json"))
+CROSSREF_MAILTO = os.getenv("CROSSREF_MAILTO", "").strip()
+NCBI_EMAIL = os.getenv("NCBI_EMAIL", CROSSREF_MAILTO).strip()
+NCBI_API_KEY = os.getenv("NCBI_API_KEY", "").strip()
+MAX_MYNCBI_PAGES = int(os.getenv("MAX_MYNCBI_PAGES", "20"))
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
+CROSSREF_ROWS = int(os.getenv("CROSSREF_ROWS", "100"))
+MAX_CROSSREF_NAME_PAGES = int(os.getenv("MAX_CROSSREF_NAME_PAGES", "2"))
+MIN_NAME_SEARCH_SCORE = int(os.getenv("MIN_NAME_SEARCH_SCORE", "120"))
+CONFIG_DIR = Path("config")
 
-ROWS_PER_PAGE = int(os.getenv("ROWS_PER_PAGE", "100"))
-MAX_PAGES_PER_QUERY = int(os.getenv("MAX_PAGES_PER_QUERY", "3"))
-REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
-MIN_NAME_FALLBACK_SCORE = int(os.getenv("MIN_NAME_FALLBACK_SCORE", "130"))
-
+SOURCE_PRIORITY = {
+    "myncbi_pubmed": 100,
+    "pubmed": 95,
+    "myncbi": 92,
+    "orcid": 88,
+    "crossref_doi": 84,
+    "manual": 82,
+    "google_scholar_seed": 80,
+    "crossref_name": 55,
+}
 AUTHOR_VARIANTS = [
-    TARGET_AUTHOR,
-    "Michael Louis Platt",
-    "Michael Platt",
-    "Michael L Platt",
-    "M L Platt",
-    "M. L. Platt",
-    "ML Platt",
+    "Michael L. Platt", "Michael Louis Platt", "Michael Platt", "Michael L Platt",
+    "M L Platt", "M. L. Platt", "ML Platt", "Platt ML", "Platt M",
 ]
-
-NEUROSCIENCE_KEYWORDS = {
-    "amygdala",
-    "attention",
-    "behavior",
-    "behaviour",
-    "brain",
-    "cognition",
-    "cognitive",
-    "cortex",
-    "cortical",
-    "decision",
-    "dopamine",
-    "electrophysiology",
-    "evolution",
-    "fmri",
-    "hippocampus",
-    "learning",
-    "macaque",
-    "monkey",
-    "motivation",
-    "neural",
-    "neuro",
-    "neurobiology",
-    "neuroeconomics",
-    "neuron",
-    "neuronal",
-    "neuroscience",
-    "prefrontal",
-    "primate",
-    "psychology",
-    "reward",
-    "social",
-    "striatum",
+CONTEXT_WORDS = {
+    "amygdala", "attention", "behavior", "behaviour", "brain", "cayo", "cognition",
+    "cognitive", "cortex", "cortical", "decision", "dopamine", "electrophysiology",
+    "foraging", "macaque", "monkey", "neural", "neuro", "neuron", "neuronal",
+    "neuroscience", "primate", "reward", "social", "striatum", "wharton", "marketing",
+    "advertising", "brand", "consumer", "economics", "decision-making",
 }
+LOW_CONTEXT_WORDS = {"geology", "astronomy", "botany", "mechanical engineering", "civil engineering"}
 
-AFFILIATION_KEYWORDS = {
-    "university of pennsylvania",
-    "penn medicine",
-    "perelman",
-    "wharton",
-    "duke",
-    "center for cognitive neuroscience",
-    "institute for brain sciences",
-    "platt lab",
-}
+@dataclass
+class Pub:
+    title: str = ""
+    authors: List[str] = field(default_factory=list)
+    journal: str = ""
+    publisher: str = ""
+    year: Optional[int] = None
+    published_date: str = ""
+    doi: str = ""
+    pmid: str = ""
+    pmcid: str = ""
+    url: str = ""
+    type: str = ""
+    abstract: str = ""
+    thumbnail_url: str = ""
+    sources: Set[str] = field(default_factory=set)
+    source_priority: int = 0
+    raw_citation: str = ""
+    score: int = 0
 
-LOW_RELEVANCE_KEYWORDS = {
-    "agriculture",
-    "astronomy",
-    "botany",
-    "civil engineering",
-    "geology",
-    "mechanical engineering",
-}
+    def key(self) -> str:
+        if self.doi:
+            return "doi:" + self.doi
+        if self.pmid:
+            return "pmid:" + self.pmid
+        return "title:" + norm_title(self.title)
 
-SUPPORTED_TYPES = {
-    "journal-article",
-    "posted-content",
-    "proceedings-article",
-    "book-chapter",
-    "reference-entry",
-    "monograph",
-}
+    def merge(self, other: "Pub") -> "Pub":
+        self.sources |= other.sources
+        self.source_priority = max(self.source_priority, other.source_priority)
+        self.score = max(self.score, other.score)
+        for attr in ["title", "journal", "publisher", "published_date", "doi", "pmid", "pmcid", "url", "type", "abstract", "thumbnail_url", "raw_citation"]:
+            if not getattr(self, attr) and getattr(other, attr):
+                setattr(self, attr, getattr(other, attr))
+        if other.title and len(other.title) > len(self.title) + 10:
+            self.title = other.title
+        if other.journal and (not self.journal or len(other.journal) > len(self.journal)):
+            self.journal = other.journal
+        if other.year and not self.year:
+            self.year = other.year
+        self.authors = uniq(self.authors + other.authors)
+        return self
 
-CROSSREF_WORKS_URL = "https://api.crossref.org/works"
+    def as_json(self) -> Dict[str, Any]:
+        url = self.url or (f"https://doi.org/{self.doi}" if self.doi else (f"https://pubmed.ncbi.nlm.nih.gov/{self.pmid}/" if self.pmid else ""))
+        return {
+            "title": self.title or "Untitled",
+            "authors": self.authors,
+            "authors_display": ", ".join(self.authors),
+            "journal": self.journal,
+            "publisher": self.publisher,
+            "year": self.year,
+            "published_date": self.published_date,
+            "doi": self.doi,
+            "pmid": self.pmid,
+            "pmcid": self.pmcid,
+            "url": url,
+            "type": self.type,
+            "thumbnail_url": self.thumbnail_url,
+            "sources": sorted(self.sources),
+            "score": self.score,
+        }
 
+def log(msg: str) -> None:
+    print(msg, flush=True)
 
-# -------------------------
-# Basic utilities
-# -------------------------
+def warn(msg: str) -> None:
+    print("WARNING: " + msg, file=sys.stderr, flush=True)
 
-def die(message: str, code: int = 1) -> int:
-    print(f"ERROR: {message}", file=sys.stderr)
-    return code
-
-
-def normalize_whitespace(value: str) -> str:
+def clean(value: Any) -> str:
+    value = html.unescape(str(value or ""))
+    value = value.replace("\u2010", "-").replace("\u2011", "-").replace("\u2012", "-").replace("\u2013", "-").replace("\u2014", "-")
+    value = value.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
+    value = unicodedata.normalize("NFKC", value)
     return re.sub(r"\s+", " ", value).strip()
 
+def norm_doi(value: Any) -> str:
+    value = clean(value)
+    value = re.sub(r"^https?://(dx\.)?doi\.org/", "", value, flags=re.I)
+    value = re.sub(r"^doi:\s*", "", value, flags=re.I)
+    return value.strip(" .;)\t\n").lower()
 
-def normalize_doi(value: str) -> str:
-    doi = str(value or "").strip()
-    doi = re.sub(r"^https?://(dx\.)?doi\.org/", "", doi, flags=re.IGNORECASE)
-    doi = re.sub(r"^doi:\s*", "", doi, flags=re.IGNORECASE)
-    return doi.lower()
+def norm_title(value: Any) -> str:
+    value = re.sub(r"[^a-z0-9]+", " ", clean(value).lower())
+    return re.sub(r"\s+", " ", value).strip()
 
+def uniq(values: Iterable[str]) -> List[str]:
+    seen, out = set(), []
+    for value in values:
+        value = clean(value)
+        if value and value.lower() not in seen:
+            seen.add(value.lower())
+            out.append(value)
+    return out
 
-def safe_first(value: Any, default: str = "") -> str:
+def to_int(value: Any) -> Optional[int]:
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return None
+
+def first(value: Any) -> str:
     if isinstance(value, list) and value:
-        return str(value[0]).strip()
+        return str(value[0])
     if isinstance(value, str):
-        return value.strip()
-    return default
+        return value
+    return ""
 
+def month_num(value: Any) -> Optional[int]:
+    value = clean(value).lower()
+    table = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,"jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+    if value.isdigit():
+        n = int(value)
+        return n if 1 <= n <= 12 else None
+    return table.get(value[:3])
 
-def strip_jats(value: str) -> str:
-    return re.sub(r"<[^>]+>", " ", value or "")
+def date_string(year: Optional[int], month: Any = "", day: Any = "") -> str:
+    if not year:
+        return ""
+    m = month_num(month) or 1
+    d = to_int(day) or 1
+    return f"{year:04d}-{m:02d}-{d:02d}"
 
+def text_xml(elem: Optional[ET.Element]) -> str:
+    return clean("".join(elem.itertext())) if elem is not None else ""
 
-def read_doi_list(path: Path) -> Set[str]:
+def extract_year(text: str) -> Optional[int]:
+    matches = re.findall(r"\b(19[7-9]\d|20[0-3]\d)\b", text)
+    return int(matches[0]) if matches else None
+
+def extract_doi(text: str) -> str:
+    m = re.search(r"\b10\.\d{4,9}/[^\s\"<>]+", text, flags=re.I)
+    return norm_doi(m.group(0)) if m else ""
+
+def extract_pmid(text: str) -> str:
+    m = re.search(r"PubMed PMID:\s*(\d+)", text, flags=re.I)
+    return m.group(1) if m else ""
+
+def extract_pmcid(text: str) -> str:
+    m = re.search(r"PubMed Central PMCID:\s*(PMC\d+)", text, flags=re.I)
+    return m.group(1) if m else ""
+
+def score_text(text: str) -> int:
+    low = clean(text).lower()
+    score = 20 if "platt" in low else 0
+    score += sum(8 for w in CONTEXT_WORDS if w in low)
+    score -= sum(12 for w in LOW_CONTEXT_WORDS if w in low)
+    return score
+
+def has_platt_author(authors: Sequence[str]) -> bool:
+    for author in authors:
+        n = norm_title(author)
+        if "platt" in n and re.search(r"\bmichael\b.*\bplatt\b|\bm\s*l?\s*platt\b|\bplatt\s*m", n):
+            return True
+    return False
+
+def make_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({"User-Agent": f"platt-labs-publications-bot/2.0 (mailto:{CROSSREF_MAILTO or NCBI_EMAIL or 'unset'})"})
+    return s
+
+def read_doi_file(path: Path) -> Set[str]:
     if not path.exists():
         return set()
-
-    values: Set[str] = set()
+    vals = set()
     for line in path.read_text(encoding="utf-8").splitlines():
-        clean = line.split("#", 1)[0].strip()
-        if clean:
-            values.add(normalize_doi(clean))
-    return values
+        line = line.split("#", 1)[0].strip()
+        if line:
+            vals.add(norm_doi(line))
+    return vals
 
-
-def unique_keep_order(values: Iterable[str]) -> List[str]:
-    seen: Set[str] = set()
-    result: List[str] = []
-    for value in values:
-        clean = normalize_whitespace(value)
-        key = clean.lower()
-        if clean and key not in seen:
-            seen.add(key)
-            result.append(clean)
-    return result
-
-
-# -------------------------
-# Crossref parsing
-# -------------------------
-
-def parse_date_parts(item: Dict[str, Any]) -> Tuple[Optional[int], str]:
-    for key in ("published-print", "published-online", "published", "issued", "created", "deposited"):
-        date_parts = item.get(key, {}).get("date-parts")
-        if not date_parts or not isinstance(date_parts, list) or not date_parts[0]:
+def read_manual(path: Path) -> List[Pub]:
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    pubs = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
             continue
+        authors = item.get("authors", [])
+        if isinstance(authors, str):
+            authors = [a.strip() for a in authors.split(",")]
+        pubs.append(Pub(
+            title=clean(item.get("title")), authors=uniq(authors), journal=clean(item.get("journal")),
+            publisher=clean(item.get("publisher")), year=to_int(item.get("year")), published_date=clean(item.get("published_date")),
+            doi=norm_doi(item.get("doi")), pmid=clean(item.get("pmid")), pmcid=clean(item.get("pmcid")),
+            url=clean(item.get("url")), type=clean(item.get("type")) or "manual", thumbnail_url=clean(item.get("thumbnail_url")),
+            sources={"manual"}, source_priority=SOURCE_PRIORITY["manual"], score=SOURCE_PRIORITY["manual"]
+        ))
+    return pubs
 
-        parts = date_parts[0]
-        try:
-            year = int(parts[0])
-            month = int(parts[1]) if len(parts) > 1 else 1
-            day = int(parts[2]) if len(parts) > 2 else 1
-            return year, f"{year:04d}-{month:02d}-{day:02d}"
-        except (TypeError, ValueError, IndexError):
+def fetch_myncbi(s: requests.Session) -> List[Pub]:
+    log("Fetching MyNCBI public bibliography...")
+    pubs = []
+    for page in range(1, MAX_MYNCBI_PAGES + 1):
+        url = MYNCBI_PUBLIC_URL if page == 1 else f"{MYNCBI_PUBLIC_URL}?page={page}"
+        r = s.get(url, timeout=REQUEST_TIMEOUT, headers={"Accept": "text/html,*/*"})
+        r.raise_for_status()
+        got = parse_myncbi(r.text)
+        if not got:
+            break
+        pubs.extend(got)
+        log(f"  MyNCBI page {page}: {len(got)} candidates")
+        text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)
+        m = re.search(r"Enter page number of\s+(\d+)", text)
+        if m and page >= int(m.group(1)):
+            break
+        time.sleep(0.25)
+    return pubs
+
+def parse_myncbi(markup: str) -> List[Pub]:
+    soup = BeautifulSoup(markup, "html.parser")
+    text = soup.get_text("\n", strip=True)
+    chunks = re.split(r"\n\s*select\s*\n", text, flags=re.I)
+    pubs = []
+    for chunk in chunks:
+        chunk = clean(chunk)
+        if not looks_citation(chunk):
             continue
+        pub = parse_myncbi_chunk(chunk)
+        if pub:
+            pubs.append(pub)
+    for a in soup.find_all("a", href=True):
+        href, title = str(a["href"]), clean(a.get_text(" ", strip=True))
+        m = re.search(r"/pubmed/(\d+)|pubmed\.ncbi\.nlm\.nih\.gov/(\d+)", href)
+        if m and title:
+            pmid = m.group(1) or m.group(2)
+            pubs.append(Pub(title=title, pmid=pmid, url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/", sources={"myncbi"}, source_priority=SOURCE_PRIORITY["myncbi"], score=SOURCE_PRIORITY["myncbi"]))
+    return pubs
 
+def looks_citation(text: str) -> bool:
+    low = text.lower()
+    return ("platt" in low or "pubmed pmid" in low) and any(x in low for x in ["doi:", "pubmed pmid", "available from", "preprint", "journal", "nature", "science", "biorxiv", "ssrn"])
+
+def parse_myncbi_chunk(text: str) -> Optional[Pub]:
+    doi, pmid, pmcid = extract_doi(text), extract_pmid(text), extract_pmcid(text)
+    m = re.search(r"Available from:\s*(https?://\S+)", text, flags=re.I)
+    url = m.group(1).rstrip(" .;)") if m else ""
+    year = extract_year(text)
+    published_date = date_string(year)
+    mm = re.search(rf"\b{year}\s+([A-Za-z]{{3,9}})\b", text) if year else None
+    if mm:
+        published_date = date_string(year, mm.group(1))
+    authors, title, journal = [], "", ""
+    parts = re.split(r"\.\s{2,}", text, maxsplit=1)
+    if len(parts) == 2:
+        authors = parse_authors(parts[0])
+        title = parts[1].split(". ", 1)[0].strip().rstrip(".")
+    else:
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        if len(sentences) >= 2:
+            authors = parse_authors(sentences[0])
+            title = sentences[1].strip().rstrip(".")
+    jm = re.search(r"\.\s*([^.;]{2,120}?)\.\s*(?:\d{4}|doi:|DOI:|PubMed PMID:)", text)
+    if jm and "Platt" not in jm.group(1):
+        journal = clean(jm.group(1))
+    if not title and doi:
+        title = "Publication " + doi
+    if not title:
+        return None
+    return Pub(title=clean(title), authors=authors, journal=journal, year=year, published_date=published_date, doi=doi, pmid=pmid, pmcid=pmcid, url=url or (f"https://doi.org/{doi}" if doi else (f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "")), type="publication", sources={"myncbi"}, source_priority=SOURCE_PRIORITY["myncbi"], raw_citation=text, score=SOURCE_PRIORITY["myncbi"] + score_text(text))
+
+def parse_authors(text: str) -> List[str]:
+    text = re.sub(r"\bet al\.?", "", text, flags=re.I)
+    return uniq([p.strip() for p in text.split(",") if 1 < len(p.strip()) < 90])
+
+def nested(obj: Any, keys: Sequence[str], default: Any = "") -> Any:
+    cur = obj
+    for key in keys:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(key)
+    return default if cur is None else cur
+
+def fetch_orcid(s: requests.Session) -> List[Pub]:
+    log("Fetching ORCID works...")
+    url = f"https://pub.orcid.org/v3.0/{TARGET_ORCID}/works"
+    r = s.get(url, headers={"Accept": "application/json"}, timeout=REQUEST_TIMEOUT)
+    if r.status_code >= 400:
+        warn(f"ORCID returned HTTP {r.status_code}; skipping")
+        return []
+    pubs = []
+    for group in r.json().get("group", []) or []:
+        for item in group.get("work-summary", []) or []:
+            title = clean(nested(item, ["title", "title", "value"]))
+            journal = clean(nested(item, ["journal-title", "value"]))
+            doi = pmid = pmcid = ""
+            ext = nested(item, ["external-ids", "external-id"], [])
+            ext = [ext] if isinstance(ext, dict) else (ext or [])
+            for e in ext:
+                typ, val = clean(e.get("external-id-type", "")).lower(), clean(e.get("external-id-value", ""))
+                if typ == "doi":
+                    doi = norm_doi(val)
+                elif typ == "pmid":
+                    pmid = val
+                elif typ in {"pmc", "pmcid"}:
+                    pmcid = val if val.upper().startswith("PMC") else "PMC" + val
+            year = to_int(nested(item, ["publication-date", "year", "value"]))
+            date = date_string(year, nested(item, ["publication-date", "month", "value"]), nested(item, ["publication-date", "day", "value"]))
+            url = clean(nested(item, ["url", "value"])) or (f"https://doi.org/{doi}" if doi else (f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""))
+            if title or doi or pmid:
+                pubs.append(Pub(title=title, journal=journal, year=year, published_date=date, doi=doi, pmid=pmid, pmcid=pmcid, url=url, type=clean(item.get("type")), sources={"orcid"}, source_priority=SOURCE_PRIORITY["orcid"], score=SOURCE_PRIORITY["orcid"]))
+    log(f"  ORCID: {len(pubs)} candidates")
+    return pubs
+
+def batches(values: Sequence[str], n: int) -> Iterable[Sequence[str]]:
+    for i in range(0, len(values), n):
+        yield values[i:i+n]
+
+def fetch_pubmed(s: requests.Session, pmids: Sequence[str], myncbi_pmids: Set[str]) -> List[Pub]:
+    pmids = sorted({p for p in pmids if str(p).isdigit()})
+    if not pmids:
+        return []
+    log(f"Fetching PubMed XML for {len(pmids)} PMIDs...")
+    pubs = []
+    for batch in batches(pmids, 150):
+        params = {"db":"pubmed", "id": ",".join(batch), "retmode":"xml", "tool":"platt-labs-publications-bot"}
+        if NCBI_EMAIL:
+            params["email"] = NCBI_EMAIL
+        if NCBI_API_KEY:
+            params["api_key"] = NCBI_API_KEY
+        r = s.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi", params=params, timeout=REQUEST_TIMEOUT, headers={"Accept":"application/xml"})
+        r.raise_for_status()
+        for pub in parse_pubmed(r.text):
+            if pub.pmid in myncbi_pmids:
+                pub.sources.add("myncbi_pubmed")
+                pub.source_priority = max(pub.source_priority, SOURCE_PRIORITY["myncbi_pubmed"])
+            pubs.append(pub)
+        time.sleep(0.35 if not NCBI_API_KEY else 0.12)
+    log(f"  PubMed: {len(pubs)} candidates")
+    return pubs
+
+def parse_pubmed(xml_text: str) -> List[Pub]:
+    root = ET.fromstring(xml_text)
+    pubs = []
+    for pma in root.findall(".//PubmedArticle"):
+        article = pma.find(".//Article")
+        med = pma.find("MedlineCitation")
+        if article is None or med is None:
+            continue
+        pmid = text_xml(med.find("PMID"))
+        title = text_xml(article.find("ArticleTitle"))
+        journal = text_xml(article.find("./Journal/Title")) or text_xml(article.find("./Journal/ISOAbbreviation"))
+        year, date = parse_pubmed_date(article)
+        authors = []
+        for au in article.findall(".//AuthorList/Author"):
+            coll = text_xml(au.find("CollectiveName"))
+            last, fore, initials = text_xml(au.find("LastName")), text_xml(au.find("ForeName")), text_xml(au.find("Initials"))
+            if coll:
+                authors.append(coll)
+            elif last and fore:
+                authors.append(f"{fore} {last}")
+            elif last and initials:
+                authors.append(f"{initials} {last}")
+        doi = pmcid = ""
+        for aid in pma.findall(".//PubmedData/ArticleIdList/ArticleId"):
+            typ, val = aid.attrib.get("IdType", "").lower(), text_xml(aid)
+            if typ == "doi":
+                doi = norm_doi(val)
+            elif typ in {"pmc", "pmcid"}:
+                pmcid = val
+        abstract = clean(" ".join(text_xml(x) for x in article.findall(".//Abstract/AbstractText")))
+        url = f"https://doi.org/{doi}" if doi else f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        pubs.append(Pub(title=title, authors=uniq(authors), journal=journal, year=year, published_date=date, doi=doi, pmid=pmid, pmcid=pmcid, url=url, type="journal-article", abstract=abstract, sources={"pubmed"}, source_priority=SOURCE_PRIORITY["pubmed"], score=SOURCE_PRIORITY["pubmed"] + score_text(" ".join([title, journal, abstract]))))
+    return pubs
+
+def parse_pubmed_date(article: ET.Element) -> Tuple[Optional[int], str]:
+    ad = article.find("./ArticleDate")
+    if ad is not None:
+        y = to_int(text_xml(ad.find("Year")))
+        return y, date_string(y, text_xml(ad.find("Month")), text_xml(ad.find("Day")))
+    pd = article.find("./Journal/JournalIssue/PubDate")
+    if pd is not None:
+        y = to_int(text_xml(pd.find("Year"))) or extract_year(text_xml(pd.find("MedlineDate")))
+        return y, date_string(y, text_xml(pd.find("Month")), text_xml(pd.find("Day")))
     return None, ""
 
-
-def extract_orcid(value: Any) -> str:
-    raw = str(value or "")
-    match = re.search(r"(\d{4}-\d{4}-\d{4}-\d{3}[\dX])", raw, re.IGNORECASE)
-    return match.group(1).upper() if match else ""
-
-
-def format_author(author: Dict[str, Any]) -> Dict[str, str]:
-    given = normalize_whitespace(str(author.get("given", "")))
-    family = normalize_whitespace(str(author.get("family", "")))
-    literal = normalize_whitespace(str(author.get("literal", "")))
-    orcid = extract_orcid(author.get("ORCID"))
-
-    if given or family:
-        name = normalize_whitespace(f"{given} {family}")
-    else:
-        name = literal
-
-    return {
-        "name": name,
-        "given": given,
-        "family": family,
-        "orcid": orcid,
-    }
-
-
-def extract_authors(item: Dict[str, Any]) -> List[Dict[str, str]]:
-    raw_authors = item.get("author")
-    if not isinstance(raw_authors, list):
+def fetch_crossref_dois(s: requests.Session, dois: Sequence[str]) -> List[Pub]:
+    dois = sorted({norm_doi(d) for d in dois if norm_doi(d)})
+    if not dois:
         return []
+    log(f"Fetching Crossref metadata for {len(dois)} DOIs...")
+    pubs = []
+    for doi in dois:
+        try:
+            params = {"mailto": CROSSREF_MAILTO} if CROSSREF_MAILTO else {}
+            r = s.get(f"https://api.crossref.org/works/{doi}", params=params, headers={"Accept":"application/json"}, timeout=REQUEST_TIMEOUT)
+            if r.status_code == 404:
+                continue
+            r.raise_for_status()
+            pub = parse_crossref(r.json().get("message", {}), "crossref_doi")
+            if pub:
+                pubs.append(pub)
+        except requests.RequestException as e:
+            warn(f"Crossref DOI lookup failed for {doi}: {e}")
+        time.sleep(0.08)
+    log(f"  Crossref DOI: {len(pubs)} candidates")
+    return pubs
 
+def fetch_crossref_names(s: requests.Session) -> List[Pub]:
+    log("Fetching Crossref name-search fallback...")
+    pubs = []
+    for variant in AUTHOR_VARIANTS:
+        cursor = "*"
+        for _ in range(MAX_CROSSREF_NAME_PAGES):
+            params = {"query.author": variant, "rows": CROSSREF_ROWS, "cursor": cursor, "sort":"published", "order":"desc"}
+            if CROSSREF_MAILTO:
+                params["mailto"] = CROSSREF_MAILTO
+            try:
+                r = s.get("https://api.crossref.org/works", params=params, headers={"Accept":"application/json"}, timeout=REQUEST_TIMEOUT)
+                r.raise_for_status()
+            except requests.RequestException as e:
+                warn(f"Crossref name search failed for {variant}: {e}")
+                break
+            msg = r.json().get("message", {})
+            for item in msg.get("items", []) or []:
+                pub = parse_crossref(item, "crossref_name")
+                if pub and pub.score >= MIN_NAME_SEARCH_SCORE:
+                    pubs.append(pub)
+            nxt = msg.get("next-cursor")
+            if not nxt or nxt == cursor:
+                break
+            cursor = nxt
+            time.sleep(0.15)
+    log(f"  Crossref name fallback: {len(pubs)} candidates kept")
+    return pubs
+
+def parse_crossref(item: Dict[str, Any], source: str) -> Optional[Pub]:
+    doi, title = norm_doi(item.get("DOI", "")), clean(first(item.get("title")))
+    if not title and not doi:
+        return None
     authors = []
-    for author in raw_authors:
-        if not isinstance(author, dict):
+    for a in item.get("author", []) or []:
+        given, family, literal = clean(a.get("given", "")), clean(a.get("family", "")), clean(a.get("literal", ""))
+        full = clean(f"{given} {family}") if given or family else literal
+        if full:
+            authors.append(full)
+    year, date = crossref_date(item)
+    journal = clean(first(item.get("container-title")))
+    publisher = clean(item.get("publisher", ""))
+    abstract = clean(re.sub(r"<[^>]+>", " ", str(item.get("abstract", ""))))
+    score = SOURCE_PRIORITY[source] + score_text(" ".join([title, journal, publisher, abstract, " ".join(authors)]))
+    if has_platt_author(authors):
+        score += 80
+    if any(TARGET_ORCID in str(a.get("ORCID", "")) for a in item.get("author", []) or []):
+        score += 150
+    return Pub(title=title, authors=uniq(authors), journal=journal, publisher=publisher, year=year, published_date=date, doi=doi, url=f"https://doi.org/{doi}" if doi else clean(item.get("URL", "")), type=clean(item.get("type", "")), abstract=abstract, sources={source}, source_priority=SOURCE_PRIORITY[source], score=score)
+
+def crossref_date(item: Dict[str, Any]) -> Tuple[Optional[int], str]:
+    for k in ["published-print", "published-online", "published", "issued", "created"]:
+        parts = item.get(k, {}).get("date-parts")
+        if isinstance(parts, list) and parts and parts[0]:
+            p = parts[0]
+            y = to_int(p[0] if len(p) > 0 else None)
+            return y, date_string(y, p[1] if len(p) > 1 else "", p[2] if len(p) > 2 else "")
+    return None, ""
+
+def google_scholar_seed() -> List[Pub]:
+    dois = read_doi_file(CONFIG_DIR / "google_scholar_dois.txt")
+    pubs = [Pub(doi=d, url=f"https://doi.org/{d}", sources={"google_scholar_seed"}, source_priority=SOURCE_PRIORITY["google_scholar_seed"], score=SOURCE_PRIORITY["google_scholar_seed"]) for d in dois]
+    if pubs:
+        log(f"Loaded {len(pubs)} Google Scholar DOI seed candidates")
+    return pubs
+
+def merge_all(pubs: Sequence[Pub]) -> Dict[str, Pub]:
+    merged: Dict[str, Pub] = {}
+    for pub in pubs:
+        if not (pub.title or pub.doi or pub.pmid):
             continue
-        parsed = format_author(author)
-        if parsed["name"]:
-            authors.append(parsed)
-
-    return authors
-
-
-def author_name_matches_target(author: Dict[str, str]) -> bool:
-    family = re.sub(r"[^a-z]", "", author.get("family", "").lower())
-    given = author.get("given", "").lower()
-    name = author.get("name", "").lower()
-
-    compact_given = re.sub(r"[^a-z]", "", given)
-    normalized_name = normalize_whitespace(re.sub(r"[^a-z0-9]+", " ", name))
-
-    if family == "platt" and compact_given in {
-        "michael",
-        "michaell",
-        "michaellouis",
-        "ml",
-        "m",
-    }:
-        return True
-
-    patterns = [
-        r"\bmichael\s+louis\s+platt\b",
-        r"\bmichael\s+l\s+platt\b",
-        r"\bmichael\s+platt\b",
-        r"\bm\s+l\s+platt\b",
-        r"\bml\s+platt\b",
-    ]
-    return any(re.search(pattern, normalized_name) for pattern in patterns)
-
-
-def item_text_blob(item: Dict[str, Any], authors: List[Dict[str, str]]) -> str:
-    fields: List[str] = [
-        safe_first(item.get("title")),
-        safe_first(item.get("subtitle")),
-        safe_first(item.get("container-title")),
-        safe_first(item.get("short-container-title")),
-        str(item.get("publisher", "")),
-        str(item.get("type", "")),
-    ]
-
-    abstract = item.get("abstract")
-    if isinstance(abstract, str):
-        fields.append(strip_jats(abstract))
-
-    subjects = item.get("subject")
-    if isinstance(subjects, list):
-        fields.extend(str(subject) for subject in subjects)
-
-    for author in authors:
-        fields.append(author.get("name", ""))
-        raw_affiliations = item.get("affiliation")
-        if isinstance(raw_affiliations, list):
-            fields.extend(str(a.get("name", "")) for a in raw_affiliations if isinstance(a, dict))
-
-    # Crossref affiliations are often nested per author.
-    for raw_author in item.get("author", []) if isinstance(item.get("author"), list) else []:
-        if not isinstance(raw_author, dict):
+        key = pub.key()
+        merged[key] = merged[key].merge(pub) if key in merged else pub
+    by_title: Dict[str, str] = {}
+    for key, pub in list(merged.items()):
+        tk = norm_title(pub.title)
+        if len(tk) < 20:
             continue
-        affiliations = raw_author.get("affiliation", [])
-        if isinstance(affiliations, list):
-            fields.extend(str(a.get("name", "")) for a in affiliations if isinstance(a, dict))
+        if tk in by_title and by_title[tk] in merged:
+            merged[by_title[tk]].merge(pub)
+            del merged[key]
+        else:
+            by_title[tk] = key
+    return merged
 
-    combined = " ".join(fields).lower()
-    return normalize_whitespace(combined)
+def filter_pubs(merged: Dict[str, Pub]) -> List[Pub]:
+    allow = read_doi_file(CONFIG_DIR / "doi_allowlist.txt")
+    block = read_doi_file(CONFIG_DIR / "doi_blocklist.txt")
+    trusted = {"myncbi", "orcid", "pubmed", "myncbi_pubmed", "manual", "google_scholar_seed"}
+    out = []
+    for pub in merged.values():
+        if pub.doi and pub.doi in block:
+            continue
+        if pub.doi and pub.doi in allow:
+            out.append(pub); continue
+        if pub.sources & trusted:
+            out.append(pub); continue
+        if has_platt_author(pub.authors) and score_text(" ".join([pub.title, pub.journal, pub.abstract, " ".join(pub.authors)])) >= 25:
+            out.append(pub)
+    return out
 
-
-def score_item(item: Dict[str, Any]) -> Tuple[int, List[str], Dict[str, int]]:
-    authors = extract_authors(item)
-    text_blob = item_text_blob(item, authors)
-    item_type = str(item.get("type", "")).lower()
-
-    score = 0
-    reasons: List[str] = []
-
-    has_orcid_match = any(author.get("orcid") == TARGET_ORCID.upper() for author in authors)
-    has_name_match = any(author_name_matches_target(author) for author in authors)
-
-    if has_orcid_match:
-        score += 200
-        reasons.append("orcid_match")
-
-    if has_name_match:
-        score += 120
-        reasons.append("name_match")
-
-    neuro_hits = sum(1 for kw in NEUROSCIENCE_KEYWORDS if kw in text_blob)
-    affiliation_hits = sum(1 for kw in AFFILIATION_KEYWORDS if kw in text_blob)
-    low_relevance_hits = sum(1 for kw in LOW_RELEVANCE_KEYWORDS if kw in text_blob)
-
-    if neuro_hits:
-        score += min(neuro_hits * 5, 60)
-        reasons.append(f"neuroscience_context:{neuro_hits}")
-
-    if affiliation_hits:
-        score += min(affiliation_hits * 10, 40)
-        reasons.append(f"affiliation_context:{affiliation_hits}")
-
-    if low_relevance_hits:
-        score -= min(low_relevance_hits * 12, 36)
-        reasons.append(f"low_relevance_context:{low_relevance_hits}")
-
-    if item_type in SUPPORTED_TYPES:
-        score += 8
-        reasons.append(f"type:{item_type}")
-
-    journal = safe_first(item.get("container-title")).lower()
-    if any(hint in journal for hint in ("neuro", "brain", "cognition", "behavior", "behaviour", "psycholog", "pnas", "nature", "science")):
-        score += 10
-        reasons.append("journal_hint")
-
-    year, _ = parse_date_parts(item)
-    if year:
-        # Tiny recency boost. It should break ties, not rewrite reality.
-        score += max(0, min(year - 1990, 30)) // 3
-        reasons.append(f"year:{year}")
-
-    diagnostics = {
-        "has_orcid_match": int(has_orcid_match),
-        "has_name_match": int(has_name_match),
-        "neuro_hits": neuro_hits,
-        "affiliation_hits": affiliation_hits,
-        "low_relevance_hits": low_relevance_hits,
-    }
-    return score, reasons, diagnostics
-
-
-def include_item(
-    item: Dict[str, Any],
-    score: int,
-    diagnostics: Dict[str, int],
-    allowlist: Set[str],
-    blocklist: Set[str],
-) -> bool:
-    doi = normalize_doi(item.get("DOI", ""))
-
-    if doi and doi in blocklist:
-        return False
-
-    if doi and doi in allowlist:
-        return True
-
-    if diagnostics["has_orcid_match"]:
-        return True
-
-    if not diagnostics["has_name_match"]:
-        return False
-
-    has_context = (
-        diagnostics["neuro_hits"] > 0
-        or diagnostics["affiliation_hits"] > 0
-    )
-
-    return bool(has_context and score >= MIN_NAME_FALLBACK_SCORE)
-
-
-def build_record(item: Dict[str, Any], score: int, reasons: List[str]) -> Dict[str, Any]:
-    authors = extract_authors(item)
-    author_names = [author["name"] for author in authors if author.get("name")]
-    year, published_date = parse_date_parts(item)
-    doi = normalize_doi(item.get("DOI", ""))
-
-    url = f"https://doi.org/{doi}" if doi else str(item.get("URL", "")).strip()
-
-    return {
-        "title": safe_first(item.get("title"), "Untitled"),
-        "authors": unique_keep_order(author_names),
-        "authors_display": ", ".join(unique_keep_order(author_names)),
-        "journal": safe_first(item.get("container-title")),
-        "publisher": str(item.get("publisher", "")).strip(),
-        "year": year,
-        "published_date": published_date,
-        "doi": doi,
-        "url": url,
-        "type": str(item.get("type", "")).strip(),
-        "score": score,
-        "match_reasons": reasons,
-    }
-
-
-# -------------------------
-# Crossref fetching
-# -------------------------
-
-def crossref_session() -> requests.Session:
-    session = requests.Session()
-    session.headers.update({
-        "Accept": "application/json",
-        "User-Agent": f"squarespace-publications-bot/1.0 (mailto:{CROSSREF_MAILTO})",
-    })
-    return session
-
-
-def fetch_crossref_pages(
-    session: requests.Session,
-    *,
-    query_author: Optional[str] = None,
-    orcid: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    items: List[Dict[str, Any]] = []
-    cursor = "*"
-    last_cursor = ""
-
-    for page in range(1, MAX_PAGES_PER_QUERY + 1):
-        params: Dict[str, Any] = {
-            "rows": ROWS_PER_PAGE,
-            "cursor": cursor,
-            "sort": "published",
-            "order": "desc",
-            "mailto": CROSSREF_MAILTO,
-        }
-
-        if query_author:
-            params["query.author"] = query_author
-
-        if orcid:
-            params["filter"] = f"orcid:{orcid}"
-
-        response = session.get(CROSSREF_WORKS_URL, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
-        response.raise_for_status()
-
-        message = response.json().get("message", {})
-        page_items = message.get("items", [])
-        if not isinstance(page_items, list) or not page_items:
-            break
-
-        items.extend(page_items)
-
-        next_cursor = str(message.get("next-cursor", ""))
-        if not next_cursor or next_cursor == last_cursor:
-            break
-
-        last_cursor = cursor
-        cursor = next_cursor
-
-        # Polite pause. Tiny, but better than acting like a broken scraper goblin.
-        time.sleep(0.5)
-
-    return items
-
-
-def collect_candidates() -> List[Dict[str, Any]]:
-    session = crossref_session()
-    all_items: List[Dict[str, Any]] = []
-
-    if TARGET_ORCID:
-        print(f"Fetching Crossref records by ORCID: {TARGET_ORCID}")
-        all_items.extend(fetch_crossref_pages(session, orcid=TARGET_ORCID))
-
-    for variant in unique_keep_order(AUTHOR_VARIANTS):
-        print(f"Fetching Crossref records by author query: {variant}")
-        all_items.extend(fetch_crossref_pages(session, query_author=variant))
-        time.sleep(0.5)
-
-    return all_items
-
-
-# -------------------------
-# Main
-# -------------------------
+def source_counts(pubs: Sequence[Pub]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for pub in pubs:
+        for src in pub.sources:
+            counts[src] = counts.get(src, 0) + 1
+    return dict(sorted(counts.items()))
 
 def main() -> int:
-    if not CROSSREF_MAILTO or "@" not in CROSSREF_MAILTO:
-        return die(
-            "Set CROSSREF_MAILTO to a real email address. Crossref recommends polite API access with contact info."
-        )
-
-    allowlist = read_doi_list(Path("config/doi_allowlist.txt"))
-    blocklist = read_doi_list(Path("config/doi_blocklist.txt"))
-
-    try:
-        candidates = collect_candidates()
-    except requests.RequestException as exc:
-        return die(f"Crossref request failed: {exc}")
-
-    if not candidates:
-        return die("No records returned from Crossref.")
-
-    best_by_key: Dict[str, Dict[str, Any]] = {}
-    debug_rows: List[Dict[str, Any]] = []
-
-    for item in candidates:
-        doi = normalize_doi(item.get("DOI", ""))
-        title_key = safe_first(item.get("title")).lower()
-        if not doi and not title_key:
-            continue
-
-        score, reasons, diagnostics = score_item(item)
-        record = build_record(item, score, reasons)
-        dedupe_key = doi or f"title:{title_key}"
-
-        debug_rows.append({
-            "included": include_item(item, score, diagnostics, allowlist, blocklist),
-            "dedupe_key": dedupe_key,
-            "title": record["title"],
-            "doi": record["doi"],
-            "year": record["year"],
-            "score": score,
-            "reasons": reasons,
-            "diagnostics": diagnostics,
-        })
-
-        if not include_item(item, score, diagnostics, allowlist, blocklist):
-            continue
-
-        existing = best_by_key.get(dedupe_key)
-        if existing is None or record["score"] > existing["score"]:
-            best_by_key[dedupe_key] = record
-
-    publications = list(best_by_key.values())
-    publications.sort(
-        key=lambda pub: (
-            -(pub["year"] or 0),
-            pub.get("published_date") or "",
-            -int(pub.get("score") or 0),
-            pub["title"].lower(),
-        ),
-        reverse=False,
-    )
-
-    OUTPUT_FILE.write_text(
-        json.dumps(publications, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-    if os.getenv("WRITE_DEBUG", "0") == "1":
-        debug_payload = {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "target_author": TARGET_AUTHOR,
-            "target_orcid": TARGET_ORCID,
-            "candidate_count": len(candidates),
-            "publication_count": len(publications),
-            "rows": debug_rows,
-        }
-        DEBUG_OUTPUT_FILE.write_text(
-            json.dumps(debug_payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-    print(f"Wrote {len(publications)} publications to {OUTPUT_FILE}")
+    if not CROSSREF_MAILTO:
+        warn("CROSSREF_MAILTO is not set. Add it as a GitHub Actions secret.")
+    s = make_session()
+    all_pubs: List[Pub] = []
+    all_pubs.extend(read_manual(CONFIG_DIR / "manual_publications.json"))
+    all_pubs.extend(google_scholar_seed())
+    myncbi = fetch_myncbi(s)
+    all_pubs.extend(myncbi)
+    all_pubs.extend(fetch_orcid(s))
+    myncbi_pmids = {p.pmid for p in myncbi if p.pmid}
+    all_pubs.extend(fetch_pubmed(s, [p.pmid for p in all_pubs if p.pmid], myncbi_pmids))
+    all_pubs.extend(fetch_crossref_dois(s, [p.doi for p in all_pubs if p.doi]))
+    all_pubs.extend(fetch_crossref_names(s))
+    merged = merge_all(all_pubs)
+    pubs = filter_pubs(merged)
+    pubs.sort(key=lambda p: (-(p.year or 0), p.published_date or "", -p.source_priority, p.title.lower()))
+    out = [p.as_json() for p in pubs]
+    OUTPUT_FILE.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "target_author": TARGET_AUTHOR,
+        "target_orcid": TARGET_ORCID,
+        "source_urls": {"orcid": f"https://orcid.org/{TARGET_ORCID}", "myncbi": MYNCBI_PUBLIC_URL, "google_scholar": GOOGLE_SCHOLAR_PROFILE_URL},
+        "counts": {"candidates": len(all_pubs), "merged": len(merged), "published": len(out)},
+        "source_counts": source_counts(pubs),
+    }
+    REPORT_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    log(f"Wrote {len(out)} publications to {OUTPUT_FILE}")
+    log(f"Wrote report to {REPORT_FILE}")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
