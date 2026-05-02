@@ -190,7 +190,7 @@ def norm_doi(value: Any) -> str:
     # DOI links want the base DOI, otherwise enrichment silently fails and we get
     # ugly abbreviated author lists. Because apparently metadata needed cosplay.
     m = re.match(
-        r"^(10\.1101/\d{4}\.\d{2}\.\d{2}\.\d+)(?:v\d+)?(?:\.(?:abstract|full|article-info|figures-only))?$",
+        r"^(10\.(?:1101|64898)/\d{4}\.\d{2}\.\d{2}\.\d+)(?:v\d+)?(?:\.(?:abstract|full|article-info|figures-only))?$",
         value,
         flags=re.I,
     )
@@ -303,8 +303,12 @@ def has_target_author_name(author: str) -> bool:
 
 def is_preprint(pub: "Pub") -> bool:
     blob = " ".join([pub.type, pub.journal, pub.publisher, pub.url, pub.doi]).lower()
-    if pub.doi.startswith("10.1101/") or pub.doi.startswith("10.31234/"):
+
+    # bioRxiv/medRxiv legacy DOIs use 10.1101; newer openRxiv DOIs use 10.64898.
+    # PsyArXiv/OSF preprints often use 10.31234.
+    if pub.doi.startswith(("10.1101/", "10.64898/", "10.31234/")):
         return True
+
     return any(hint in blob for hint in PREPRINT_TYPE_HINTS)
 
 def normalized_type(pub: "Pub") -> str:
@@ -318,11 +322,22 @@ def normalized_type(pub: "Pub") -> str:
 def normalized_journal(pub: "Pub") -> str:
     journal = clean(pub.journal)
     low = journal.lower()
-    if "biorxiv" in low or pub.doi.startswith("10.1101/") or "biorxiv" in pub.url.lower():
-        return "bioRxiv"
-    if "medrxiv" in low or "medrxiv" in pub.url.lower():
+    blob = " ".join([journal, pub.publisher, pub.url, pub.doi, pub.type]).lower()
+
+    # New openRxiv DOIs use the 10.64898 prefix for bioRxiv/medRxiv. Most Platt
+    # Lab openRxiv records here are bioRxiv biology preprints, and Crossref often
+    # gives them publisher=openRxiv, type=posted-content, and an empty journal.
+    # Without this normalization the Squarespace card falls back to "Research Article",
+    # which is the tiny metadata gremlin we are stomping on here.
+    if "medrxiv" in blob:
         return "medRxiv"
-    if journal in {"[preprint]", "preprint", "posted-content"}:
+    if "biorxiv" in blob or pub.doi.startswith(("10.1101/", "10.64898/")):
+        return "bioRxiv"
+    if "psyarxiv" in blob or pub.doi.startswith("10.31234/"):
+        return "PsyArXiv"
+    if "ssrn" in blob:
+        return "SSRN"
+    if journal in {"[preprint]", "preprint", "posted-content"} or "openrxiv" in blob:
         return "Preprint"
     return journal
 
