@@ -1,0 +1,4 @@
+# Add DOI values from Google Scholar here, one per line.
+# The updater will fetch full metadata for these through Crossref.
+# Example:
+# 10.1038/s41586-024-07178-6
