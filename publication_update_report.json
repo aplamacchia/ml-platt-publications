@@ -1,5 +1,23 @@
 {
-  "generated_at": null,
-  "counts": {},
-  "source_counts": {}
+  "generated_at": "2026-05-02T02:22:21.528558+00:00",
+  "target_author": "Michael L. Platt",
+  "target_orcid": "0000-0003-3912-8821",
+  "source_urls": {
+    "orcid": "https://orcid.org/0000-0003-3912-8821",
+    "myncbi": "https://www.ncbi.nlm.nih.gov/myncbi/plattlab/bibliography/public/",
+    "google_scholar": "https://scholar.google.com/citations?user=U9Hu2rcAAAAJ&hl=en"
+  },
+  "counts": {
+    "candidates": 1205,
+    "merged": 284,
+    "published": 271
+  },
+  "source_counts": {
+    "crossref_doi": 250,
+    "crossref_name": 15,
+    "myncbi": 257,
+    "myncbi_pubmed": 244,
+    "orcid": 30,
+    "pubmed": 244
+  }
 }
