@@ -32,9 +32,12 @@ CROSSREF_MAILTO = os.getenv("CROSSREF_MAILTO", "").strip()
 NCBI_EMAIL = os.getenv("NCBI_EMAIL", CROSSREF_MAILTO).strip()
 NCBI_API_KEY = os.getenv("NCBI_API_KEY", "").strip()
 MAX_MYNCBI_PAGES = int(os.getenv("MAX_MYNCBI_PAGES", "20"))
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "12"))
 CROSSREF_ROWS = int(os.getenv("CROSSREF_ROWS", "100"))
-MAX_CROSSREF_NAME_PAGES = int(os.getenv("MAX_CROSSREF_NAME_PAGES", "2"))
+MAX_CROSSREF_NAME_PAGES = int(os.getenv("MAX_CROSSREF_NAME_PAGES", "1"))
+MAX_CROSSREF_DOI_LOOKUPS = int(os.getenv("MAX_CROSSREF_DOI_LOOKUPS", "80"))
+ENABLE_CROSSREF_DOI_ENRICHMENT = os.getenv("ENABLE_CROSSREF_DOI_ENRICHMENT", "1").lower() in {"1", "true", "yes", "on"}
+ENABLE_CROSSREF_NAME_FALLBACK = os.getenv("ENABLE_CROSSREF_NAME_FALLBACK", "0").lower() in {"1", "true", "yes", "on"}
 MIN_NAME_SEARCH_SCORE = int(os.getenv("MIN_NAME_SEARCH_SCORE", "120"))
 CONFIG_DIR = Path("config")
 
@@ -981,6 +984,57 @@ def google_scholar_seed() -> List[Pub]:
         log(f"Loaded {len(pubs)} Google Scholar DOI seed candidates")
     return pubs
 
+def needs_crossref_doi_lookup(pub: Pub) -> bool:
+    """Return True only when Crossref DOI enrichment is worth the network call.
+
+    Earlier versions looked up every DOI individually. That is accurate but slow:
+    a large bibliography can produce hundreds of Crossref requests, and GitHub
+    Actions will sit there politely aging in public. We now enrich selectively.
+    """
+    if not pub.doi:
+        return False
+
+    # User-supplied DOI seeds usually have no title/authors until Crossref fills them.
+    if pub.sources & {"google_scholar_seed"}:
+        return True
+
+    # ORCID summaries and sparse MyNCBI stubs sometimes need DOI metadata.
+    if not pub.title or not pub.authors:
+        return True
+
+    # DOI landing metadata is useful for preprints, especially bioRxiv/openRxiv.
+    if pub.doi.startswith(("10.1101/", "10.64898/")):
+        return True
+
+    # Empty journal fields look bad in Squarespace cards unless type is already clear.
+    if not pub.journal and normalized_type(pub) != "preprint":
+        return True
+
+    return False
+
+
+def select_crossref_dois_for_lookup(pubs: Sequence[Pub]) -> List[str]:
+    selected: List[str] = []
+    seen: Set[str] = set()
+
+    for pub in pubs:
+        doi = norm_doi(pub.doi)
+        if not doi or doi in seen:
+            continue
+        if needs_crossref_doi_lookup(pub):
+            seen.add(doi)
+            selected.append(doi)
+
+    if len(selected) > MAX_CROSSREF_DOI_LOOKUPS:
+        warn(
+            f"Limiting Crossref DOI lookups from {len(selected)} to {MAX_CROSSREF_DOI_LOOKUPS}. "
+            "Add important missing DOIs to config/google_scholar_dois.txt if needed."
+        )
+        selected = selected[:MAX_CROSSREF_DOI_LOOKUPS]
+
+    return selected
+
+
 def merge_all(pubs: Sequence[Pub]) -> Dict[str, Pub]:
     merged: Dict[str, Pub] = {}
     pubs = [normalize_pub(pub) for pub in pubs]
@@ -1083,8 +1137,19 @@ def main() -> int:
     all_pubs.extend(fetch_orcid(s))
     myncbi_pmids = {p.pmid for p in myncbi if p.pmid}
     all_pubs.extend(fetch_pubmed(s, [p.pmid for p in all_pubs if p.pmid], myncbi_pmids))
-    all_pubs.extend(fetch_crossref_dois(s, [p.doi for p in all_pubs if p.doi]))
-    all_pubs.extend(fetch_crossref_names(s))
+
+    if ENABLE_CROSSREF_DOI_ENRICHMENT:
+        crossref_dois = select_crossref_dois_for_lookup(all_pubs)
+        log(f"Selected {len(crossref_dois)} DOIs for Crossref enrichment.")
+        all_pubs.extend(fetch_crossref_dois(s, crossref_dois))
+    else:
+        log("Skipping Crossref DOI enrichment by configuration.")
+
+    if ENABLE_CROSSREF_NAME_FALLBACK:
+        all_pubs.extend(fetch_crossref_names(s))
+    else:
+        log("Skipping broad Crossref name-search fallback by default. Use Google Scholar DOI seeds for missing items.")
+
     all_pubs = [normalize_pub(pub) for pub in all_pubs]
     merged = merge_all(all_pubs)
     pubs = filter_pubs(merged)
@@ -1099,6 +1164,12 @@ def main() -> int:
         "counts": {"candidates": len(all_pubs), "merged": len(merged), "published": len(out)},
         "source_counts": source_counts(pubs),
         "author_strategy": "single_best_source_list_with_fragment_pruning",
+        "performance_strategy": {
+            "crossref_doi_enrichment": ENABLE_CROSSREF_DOI_ENRICHMENT,
+            "crossref_name_fallback": ENABLE_CROSSREF_NAME_FALLBACK,
+            "max_crossref_doi_lookups": MAX_CROSSREF_DOI_LOOKUPS,
+            "request_timeout_seconds": REQUEST_TIMEOUT
+        },
     }
     REPORT_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     log(f"Wrote {len(out)} publications to {OUTPUT_FILE}")

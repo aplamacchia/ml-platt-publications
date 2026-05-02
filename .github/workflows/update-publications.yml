@@ -37,6 +37,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Generate publications.json
+        timeout-minutes: 12
         env:
           CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
           NCBI_EMAIL: ${{ secrets.CROSSREF_MAILTO }}
@@ -46,6 +47,10 @@ jobs:
           GOOGLE_SCHOLAR_PROFILE_URL: "https://scholar.google.com/citations?user=U9Hu2rcAAAAJ&hl=en"
           OUTPUT_FILE: "publications.json"
           REPORT_FILE: "publication_update_report.json"
+          REQUEST_TIMEOUT: "12"
+          MAX_CROSSREF_DOI_LOOKUPS: "80"
+          ENABLE_CROSSREF_DOI_ENRICHMENT: "1"
+          ENABLE_CROSSREF_NAME_FALLBACK: "0"
         run: python scripts/update_publications.py
 
       - name: Validate generated JSON files
