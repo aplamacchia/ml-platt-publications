@@ -61,6 +61,41 @@ CONTEXT_WORDS = {
 }
 LOW_CONTEXT_WORDS = {"geology", "astronomy", "botany", "mechanical engineering", "civil engineering"}
 
+PREPRINT_TYPE_HINTS = {
+    "preprint", "biorxiv", "medrxiv", "psyarxiv", "osf", "openrxiv", "posted-content",
+    "preprints", "preprints.org", "research square", "ssrn", "arxiv"
+}
+
+AUTHOR_NAME_CORRECTIONS = {
+    "lamacchi a": "Alessandro P. Lamacchia",
+    "parodi f": "Felipe Parodi",
+    "matelsky j": "Jordan K. Matelsky",
+    "selgado m": "Melanie Segado",
+    "segado m": "Melanie Segado",
+    "jiang y": "Yaoguang Jiang",
+    "regla vargas a": "Alejandra Regla-Vargas",
+    "sofi l": "Liala Sofi",
+    "kimock c": "Clare Kimock",
+    "waller b": "Bridget M. Waller",
+    "kording k": "Konrad P. Kording",
+    "platt m": "Michael L. Platt",
+    "platt ml": "Michael L. Platt",
+}
+
+PRIMATEFACE_AUTHORS = [
+    "Felipe Parodi",
+    "Jordan K. Matelsky",
+    "Alessandro P. Lamacchia",
+    "Melanie Segado",
+    "Yaoguang Jiang",
+    "Alejandra Regla-Vargas",
+    "Liala Sofi",
+    "Clare Kimock",
+    "Bridget M. Waller",
+    "Michael L. Platt",
+    "Konrad P. Kording",
+]
+
 @dataclass
 class Pub:
     title: str = ""
@@ -101,16 +136,18 @@ class Pub:
             self.journal = other.journal
         if other.year and not self.year:
             self.year = other.year
-        self.authors = uniq(self.authors + other.authors)
+        self.authors = merge_authors(self.authors, other.authors)
+        normalize_pub(self)
         return self
 
     def as_json(self) -> Dict[str, Any]:
+        normalize_pub(self)
         url = self.url or (f"https://doi.org/{self.doi}" if self.doi else (f"https://pubmed.ncbi.nlm.nih.gov/{self.pmid}/" if self.pmid else ""))
         return {
             "title": self.title or "Untitled",
             "authors": self.authors,
             "authors_display": ", ".join(self.authors),
-            "journal": self.journal,
+            "journal": normalized_journal(self),
             "publisher": self.publisher,
             "year": self.year,
             "published_date": self.published_date,
@@ -118,7 +155,7 @@ class Pub:
             "pmid": self.pmid,
             "pmcid": self.pmcid,
             "url": url,
-            "type": self.type,
+            "type": normalized_type(self),
             "thumbnail_url": self.thumbnail_url,
             "sources": sorted(self.sources),
             "score": self.score,
@@ -132,6 +169,8 @@ def warn(msg: str) -> None:
 
 def clean(value: Any) -> str:
     value = html.unescape(str(value or ""))
+    # Strip publisher/XML tags such as <scp>DNA</scp> before normalization.
+    value = re.sub(r"<[^>]+>", " ", value)
     value = value.replace("\u2010", "-").replace("\u2011", "-").replace("\u2012", "-").replace("\u2013", "-").replace("\u2014", "-")
     value = value.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
     value = unicodedata.normalize("NFKC", value)
@@ -139,22 +178,171 @@ def clean(value: Any) -> str:
 
 def norm_doi(value: Any) -> str:
     value = clean(value)
+    # If someone hands us an entire publisher URL, extract the DOI substring.
+    found = re.search(r"10\.\d{4,9}/[^\s\"<>]+", value, flags=re.I)
+    if found:
+        value = found.group(0)
     value = re.sub(r"^https?://(dx\.)?doi\.org/", "", value, flags=re.I)
     value = re.sub(r"^doi:\s*", "", value, flags=re.I)
-    return value.strip(" .;)\t\n").lower()
+    value = value.strip(" .;)\t\n").lower()
 
+    # bioRxiv/medRxiv URLs often appear as ...669927v2.abstract. Crossref and
+    # DOI links want the base DOI, otherwise enrichment silently fails and we get
+    # ugly abbreviated author lists. Because apparently metadata needed cosplay.
+    m = re.match(
+        r"^(10\.1101/\d{4}\.\d{2}\.\d{2}\.\d+)(?:v\d+)?(?:\.(?:abstract|full|article-info|figures-only))?$",
+        value,
+        flags=re.I,
+    )
+    if m:
+        return m.group(1).lower()
+    return value
 def norm_title(value: Any) -> str:
     value = re.sub(r"[^a-z0-9]+", " ", clean(value).lower())
     return re.sub(r"\s+", " ", value).strip()
 
+
+TITLE_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "into", "is", "of", "on", "or", "the", "to", "with",
+    "article", "articles", "study", "studies", "research", "report", "reports", "review",
+}
+
+def title_fingerprint(value: Any) -> str:
+    """Loose title key used only after DOI/PMID and exact-title merging.
+
+    It catches duplicates where one source keeps punctuation/subtitles and another
+    source strips them. It deliberately requires several meaningful words so we do
+    not merge unrelated short titles like sensible software gremlins.
+    """
+    title = norm_title(value)
+    if not title:
+        return ""
+    tokens = [t for t in title.split() if len(t) > 2 and t not in TITLE_STOPWORDS]
+    if len(tokens) < 6:
+        return ""
+    return " ".join(tokens[:14])
+
+def titles_compatible(a: "Pub", b: "Pub") -> bool:
+    """Return True when two records are safe to merge by loose title.
+
+    Requirements:
+    - same loose fingerprint
+    - years are the same or within 1 year, when both are known
+    - at least one shared strong identifier OR substantial exact title overlap
+    """
+    if title_fingerprint(a.title) != title_fingerprint(b.title):
+        return False
+    if a.year and b.year and abs(a.year - b.year) > 1:
+        return False
+    if a.doi and b.doi and a.doi != b.doi:
+        return False
+    if a.pmid and b.pmid and a.pmid != b.pmid:
+        return False
+    a_words = set(norm_title(a.title).split())
+    b_words = set(norm_title(b.title).split())
+    if not a_words or not b_words:
+        return False
+    overlap = len(a_words & b_words) / max(1, min(len(a_words), len(b_words)))
+    return overlap >= 0.78
+
+def clean_author(value: Any) -> str:
+    value = clean(value).strip(" .;,:")
+    key = norm_title(value)
+    return AUTHOR_NAME_CORRECTIONS.get(key, value)
+
 def uniq(values: Iterable[str]) -> List[str]:
     seen, out = set(), []
     for value in values:
-        value = clean(value)
+        value = clean_author(value)
         if value and value.lower() not in seen:
             seen.add(value.lower())
             out.append(value)
     return out
+
+def author_list_quality(authors: Sequence[str]) -> float:
+    score = 0.0
+    for author in authors:
+        n = norm_title(clean_author(author))
+        tokens = n.split()
+        if len(tokens) >= 2:
+            score += 1
+        if tokens and len(tokens[0]) > 1 and tokens[0] not in {"m", "ml", "a", "f", "j", "k"}:
+            score += 2
+        if len(clean_author(author)) >= 12:
+            score += 1
+    return score + len(authors) * 0.1
+
+def merge_authors(existing: Sequence[str], incoming: Sequence[str]) -> List[str]:
+    existing_u = uniq(existing)
+    incoming_u = uniq(incoming)
+    if not existing_u:
+        return incoming_u
+    if not incoming_u:
+        return existing_u
+    if author_list_quality(incoming_u) > author_list_quality(existing_u) + 2:
+        return uniq(list(incoming_u) + list(existing_u))
+    return uniq(list(existing_u) + list(incoming_u))
+
+def has_target_author_name(author: str) -> bool:
+    """Match Michael L. Platt, but not Jonathan M. Platt or Frances M. Platt."""
+    n = norm_title(clean_author(author))
+    if not n:
+        return False
+    patterns = [
+        r"^michael\s+platt$",
+        r"^michael\s+l\s+platt$",
+        r"^michael\s+louis\s+platt$",
+        r"^m\s+l\s+platt$",
+        r"^ml\s+platt$",
+        r"^platt\s+m$",
+        r"^platt\s+ml$",
+        r"^platt\s+michael$",
+        r"^platt\s+michael\s+l$",
+    ]
+    return any(re.search(p, n) for p in patterns)
+
+def is_preprint(pub: "Pub") -> bool:
+    blob = " ".join([pub.type, pub.journal, pub.publisher, pub.url, pub.doi]).lower()
+    if pub.doi.startswith("10.1101/") or pub.doi.startswith("10.31234/"):
+        return True
+    return any(hint in blob for hint in PREPRINT_TYPE_HINTS)
+
+def normalized_type(pub: "Pub") -> str:
+    if is_preprint(pub):
+        return "preprint"
+    raw = clean(pub.type).lower()
+    if raw in {"journal-article", "publication", "article", "journal article"}:
+        return "research-article"
+    return raw or "research-article"
+
+def normalized_journal(pub: "Pub") -> str:
+    journal = clean(pub.journal)
+    low = journal.lower()
+    if "biorxiv" in low or pub.doi.startswith("10.1101/") or "biorxiv" in pub.url.lower():
+        return "bioRxiv"
+    if "medrxiv" in low or "medrxiv" in pub.url.lower():
+        return "medRxiv"
+    if journal in {"[preprint]", "preprint", "posted-content"}:
+        return "Preprint"
+    return journal
+
+def normalize_pub(pub: "Pub") -> "Pub":
+    pub.title = clean(pub.title).rstrip(" .")
+    pub.journal = clean(pub.journal)
+    pub.publisher = clean(pub.publisher)
+    pub.doi = norm_doi(pub.doi)
+    pub.authors = uniq(pub.authors)
+    if "primateface" in norm_title(pub.title):
+        pub.authors = PRIMATEFACE_AUTHORS
+        pub.type = "preprint"
+        if not pub.journal or "preprint" in pub.journal.lower():
+            pub.journal = "bioRxiv"
+        if pub.doi.startswith("10.1101/"):
+            pub.url = f"https://www.biorxiv.org/content/{pub.doi}v2"
+    if is_preprint(pub):
+        pub.type = "preprint"
+        pub.journal = normalized_journal(pub)
+    return pub
 
 def to_int(value: Any) -> Optional[int]:
     try:
@@ -211,11 +399,7 @@ def score_text(text: str) -> int:
     return score
 
 def has_platt_author(authors: Sequence[str]) -> bool:
-    for author in authors:
-        n = norm_title(author)
-        if "platt" in n and re.search(r"\bmichael\b.*\bplatt\b|\bm\s*l?\s*platt\b|\bplatt\s*m", n):
-            return True
-    return False
+    return any(has_target_author_name(author) for author in authors)
 
 def make_session() -> requests.Session:
     s = requests.Session()
@@ -230,6 +414,16 @@ def read_doi_file(path: Path) -> Set[str]:
         line = line.split("#", 1)[0].strip()
         if line:
             vals.add(norm_doi(line))
+    return vals
+
+def read_id_file(path: Path) -> Set[str]:
+    if not path.exists():
+        return set()
+    vals = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            vals.add(clean(line))
     return vals
 
 def read_manual(path: Path) -> List[Pub]:
@@ -321,7 +515,11 @@ def parse_myncbi_chunk(text: str) -> Optional[Pub]:
         title = "Publication " + doi
     if not title:
         return None
-    return Pub(title=clean(title), authors=authors, journal=journal, year=year, published_date=published_date, doi=doi, pmid=pmid, pmcid=pmcid, url=url or (f"https://doi.org/{doi}" if doi else (f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "")), type="publication", sources={"myncbi"}, source_priority=SOURCE_PRIORITY["myncbi"], raw_citation=text, score=SOURCE_PRIORITY["myncbi"] + score_text(text))
+    if not doi and url:
+        doi = extract_doi(url)
+    pub_type = "preprint" if any(x in text.lower() for x in ["[preprint]", "biorxiv", "medrxiv", "ssrn"]) or doi.startswith("10.1101/") else "publication"
+    pub = Pub(title=clean(title), authors=authors, journal=journal, year=year, published_date=published_date, doi=doi, pmid=pmid, pmcid=pmcid, url=url or (f"https://doi.org/{doi}" if doi else (f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "")), type=pub_type, sources={"myncbi"}, source_priority=SOURCE_PRIORITY["myncbi"], raw_citation=text, score=SOURCE_PRIORITY["myncbi"] + score_text(text))
+    return normalize_pub(pub)
 
 def parse_authors(text: str) -> List[str]:
     text = re.sub(r"\bet al\.?", "", text, flags=re.I)
@@ -478,7 +676,7 @@ def fetch_crossref_names(s: requests.Session) -> List[Pub]:
             msg = r.json().get("message", {})
             for item in msg.get("items", []) or []:
                 pub = parse_crossref(item, "crossref_name")
-                if pub and pub.score >= MIN_NAME_SEARCH_SCORE:
+                if pub and has_platt_author(pub.authors) and pub.score >= MIN_NAME_SEARCH_SCORE:
                     pubs.append(pub)
             nxt = msg.get("next-cursor")
             if not nxt or nxt == cursor:
@@ -527,11 +725,17 @@ def google_scholar_seed() -> List[Pub]:
 
 def merge_all(pubs: Sequence[Pub]) -> Dict[str, Pub]:
     merged: Dict[str, Pub] = {}
+    pubs = [normalize_pub(pub) for pub in pubs]
+
+    # Pass 1: merge by canonical identifiers.
+    # DOI wins first, then PMID, then exact normalized title.
     for pub in pubs:
         if not (pub.title or pub.doi or pub.pmid):
             continue
         key = pub.key()
         merged[key] = merged[key].merge(pub) if key in merged else pub
+
+    # Pass 2: merge exact title duplicates that came in under different IDs.
     by_title: Dict[str, str] = {}
     for key, pub in list(merged.items()):
         tk = norm_title(pub.title)
@@ -542,22 +746,64 @@ def merge_all(pubs: Sequence[Pub]) -> Dict[str, Pub]:
             del merged[key]
         else:
             by_title[tk] = key
+
+    # Pass 3: conservative loose-title merge for source formatting differences.
+    # This catches cases like punctuation/subtitle/capitalization variations without
+    # merging unrelated short titles, because publication metadata already enjoys
+    # being chaotic enough.
+    by_fingerprint: Dict[str, str] = {}
+    for key, pub in list(merged.items()):
+        fp = title_fingerprint(pub.title)
+        if not fp:
+            continue
+        existing_key = by_fingerprint.get(fp)
+        if existing_key and existing_key in merged and titles_compatible(merged[existing_key], pub):
+            merged[existing_key].merge(pub)
+            del merged[key]
+        else:
+            by_fingerprint[fp] = key
+
     return merged
+
+def has_target_evidence(pub: Pub) -> bool:
+    if has_platt_author(pub.authors):
+        return True
+    if "orcid" in pub.sources:
+        # ORCID works come from Michael L. Platt's own ORCID record. Some ORCID
+        # summaries do not include a full author list, so this remains trusted.
+        return True
+    if has_target_author_name(pub.raw_citation):
+        return True
+    return False
 
 def filter_pubs(merged: Dict[str, Pub]) -> List[Pub]:
     allow = read_doi_file(CONFIG_DIR / "doi_allowlist.txt")
-    block = read_doi_file(CONFIG_DIR / "doi_blocklist.txt")
-    trusted = {"myncbi", "orcid", "pubmed", "myncbi_pubmed", "manual", "google_scholar_seed"}
+    doi_block = read_doi_file(CONFIG_DIR / "doi_blocklist.txt")
+    pmid_block = read_id_file(CONFIG_DIR / "pmid_blocklist.txt")
+    user_curated = {"manual", "google_scholar_seed"}
     out = []
     for pub in merged.values():
-        if pub.doi and pub.doi in block:
+        normalize_pub(pub)
+        if pub.doi and pub.doi in doi_block:
+            continue
+        if pub.pmid and pub.pmid in pmid_block:
             continue
         if pub.doi and pub.doi in allow:
             out.append(pub); continue
-        if pub.sources & trusted:
+        if pub.sources & user_curated:
             out.append(pub); continue
-        if has_platt_author(pub.authors) and score_text(" ".join([pub.title, pub.journal, pub.abstract, " ".join(pub.authors)])) >= 25:
-            out.append(pub)
+
+        # Critical quality gate: MyNCBI is a lab bibliography, not a guaranteed
+        # target-author list. Crossref name search also catches Jonathan/Frances
+        # Platt. Keep a record only when Michael L. Platt is actually an author
+        # or it came directly from the target ORCID record.
+        if not has_target_evidence(pub):
+            continue
+
+        if "crossref_name" in pub.sources and not ({"myncbi", "myncbi_pubmed", "pubmed", "orcid", "crossref_doi"} & pub.sources):
+            if score_text(" ".join([pub.title, pub.journal, pub.abstract, " ".join(pub.authors)])) < 25:
+                continue
+        out.append(pub)
     return out
 
 def source_counts(pubs: Sequence[Pub]) -> Dict[str, int]:
@@ -581,6 +827,7 @@ def main() -> int:
     all_pubs.extend(fetch_pubmed(s, [p.pmid for p in all_pubs if p.pmid], myncbi_pmids))
     all_pubs.extend(fetch_crossref_dois(s, [p.doi for p in all_pubs if p.doi]))
     all_pubs.extend(fetch_crossref_names(s))
+    all_pubs = [normalize_pub(pub) for pub in all_pubs]
     merged = merge_all(all_pubs)
     pubs = filter_pubs(merged)
     pubs.sort(key=lambda p: (-(p.year or 0), p.published_date or "", -p.source_priority, p.title.lower()))
