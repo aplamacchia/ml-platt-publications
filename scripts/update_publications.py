@@ -271,13 +271,26 @@ def clean_author(value: Any) -> str:
     return load_author_name_corrections().get(key, value)
 
 def author_initials_from_tokens(tokens: Sequence[str]) -> str:
+    """Return initials for a list of given/middle-name tokens.
+
+    Full given names contribute their first letter. Short all-caps initial chunks
+    such as "LJN" or "JN" contribute the whole chunk. That helps match forms like
+    "Lauren JN Brent" with "Brent LJN" without deciding every human named Amy has
+    initials AMY, because publication metadata has caused enough harm already.
+    """
     initials = []
     for token in tokens:
-        pieces = [p for p in re.split(r"[^a-z0-9]+", token.lower()) if p]
-        for piece in pieces:
-            if piece:
+        raw_pieces = [p for p in re.split(r"[^A-Za-z0-9]+", str(token)) if p]
+        for raw_piece in raw_pieces:
+            piece = raw_piece.lower()
+            if not piece:
+                continue
+            if len(piece) <= 4 and raw_piece.isupper():
+                initials.append(piece)
+            else:
                 initials.append(piece[0])
     return "".join(initials)
+
 
 def author_key(value: Any) -> str:
     """Canonical person key for merging 'Rennie SM' with 'Scott M. Rennie'.
@@ -356,6 +369,119 @@ def author_display_quality(value: Any) -> float:
     score -= 2.0 if author.endswith(".") and len(tokens) <= 2 else 0.0
     return score
 
+def is_group_author(value: Any) -> bool:
+    n = norm_title(value)
+    group_words = {
+        "unit", "group", "consortium", "collaboration", "committee", "team",
+        "network", "initiative", "project", "biobank", "research", "study",
+    }
+    return bool(set(n.split()) & group_words)
+
+def author_tokens(value: Any) -> List[str]:
+    return norm_title(clean_author(value)).split()
+
+def looks_like_fragment_of(author: str, other: str) -> bool:
+    """Detect broken fragments caused by citation parsing/merged sources.
+
+    Examples we drop only when the fuller name exists nearby:
+    - "Michael L" when "Michael L. Platt" exists
+    - "K" when "K. M. Sharika" exists
+    - "Hart J" when "Jordan D. A. Hart" exists
+    """
+    a_tokens = author_tokens(author)
+    b_tokens = author_tokens(other)
+    if not a_tokens or not b_tokens or len(b_tokens) <= len(a_tokens):
+        return False
+    if is_group_author(author) or is_group_author(other):
+        return False
+
+    # Prefix fragment: "Michael L" vs "Michael L Platt"; "K" vs "K M Sharika".
+    if len(a_tokens) <= 2 and b_tokens[:len(a_tokens)] == a_tokens:
+        return True
+
+    # Surname-initial abbreviation fragment: "Hart J" vs "Jordan D A Hart".
+    if len(a_tokens) == 2 and len(a_tokens[1]) <= 4:
+        family, initials = a_tokens
+        if b_tokens[-1] == family:
+            full_initials = author_initials_from_tokens(b_tokens[:-1])
+            if full_initials.startswith(initials) or initials.startswith(full_initials):
+                return True
+
+    return False
+
+def remove_author_fragments(authors: Sequence[str]) -> List[str]:
+    cleaned = [clean_author(a) for a in authors if clean_author(a)]
+    if len(cleaned) < 2:
+        return cleaned
+
+    keep: List[str] = []
+    for i, author in enumerate(cleaned):
+        if any(i != j and looks_like_fragment_of(author, other) for j, other in enumerate(cleaned)):
+            continue
+        keep.append(author)
+    return keep
+
+def canonical_author_key_matches(a: str, b: str) -> bool:
+    ak = author_key(a)
+    bk = author_key(b)
+    if not ak or not bk:
+        return False
+    if ak == bk:
+        return True
+    if "|" not in ak or "|" not in bk:
+        return False
+    af, ai = ak.split("|", 1)
+    bf, bi = bk.split("|", 1)
+    if af != bf or not ai or not bi:
+        return False
+    return ai.startswith(bi) or bi.startswith(ai)
+
+def author_lists_overlap(a: Sequence[str], b: Sequence[str]) -> float:
+    if not a or not b:
+        return 0.0
+    matched = 0
+    for left in a:
+        if any(canonical_author_key_matches(left, right) for right in b):
+            matched += 1
+    return matched / max(1, min(len(a), len(b)))
+
+def choose_best_author_list(existing: Sequence[str], incoming: Sequence[str]) -> List[str]:
+    """Choose one coherent author list instead of unioning every metadata source.
+
+    Earlier versions unioned MyNCBI abbreviations, PubMed names, and Crossref
+    names. That produced displays like "Michael L. Platt, Peter Sterling, Michael L".
+    Each source is now treated as a candidate author list; the cleanest complete
+    list wins.
+    """
+    existing_u = remove_author_fragments(uniq(existing))
+    incoming_u = remove_author_fragments(uniq(incoming))
+
+    if not existing_u:
+        return incoming_u
+    if not incoming_u:
+        return existing_u
+
+    existing_score = author_list_quality(existing_u)
+    incoming_score = author_list_quality(incoming_u)
+    overlap = author_lists_overlap(existing_u, incoming_u)
+
+    # Same people, different formatting. Pick the richer display list.
+    if overlap >= 0.45:
+        return incoming_u if incoming_score > existing_score else existing_u
+
+    # One list is clearly richer. Pick it, do not union it.
+    if incoming_score >= existing_score + 4:
+        return incoming_u
+    if existing_score >= incoming_score + 4:
+        return existing_u
+
+    # Last resort: choose the fuller/better list. Unioning is the root problem.
+    if len(incoming_u) > len(existing_u):
+        return incoming_u
+    if len(existing_u) > len(incoming_u):
+        return existing_u
+    return incoming_u if incoming_score > existing_score else existing_u
+
 def uniq(values: Iterable[str]) -> List[str]:
     order: List[str] = []
     best_by_key: Dict[str, str] = {}
@@ -375,7 +501,8 @@ def uniq(values: Iterable[str]) -> List[str]:
         if author_display_quality(cleaned) > author_display_quality(current):
             best_by_key[key] = cleaned
 
-    return [best_by_key[key] for key in order if best_by_key.get(key)]
+    return remove_author_fragments([best_by_key[key] for key in order if best_by_key.get(key)])
+
 
 def author_list_quality(authors: Sequence[str]) -> float:
     score = 0.0
@@ -396,18 +523,8 @@ def author_list_quality(authors: Sequence[str]) -> float:
     return score + len(uniq(authors)) * 0.1
 
 def merge_authors(existing: Sequence[str], incoming: Sequence[str]) -> List[str]:
-    existing_u = uniq(existing)
-    incoming_u = uniq(incoming)
-    if not existing_u:
-        return incoming_u
-    if not incoming_u:
-        return existing_u
+    return choose_best_author_list(existing, incoming)
 
-    # Prefer the richer list first, but canonical de-duplication prevents the
-    # PubMed/Crossref/MyNCBI triple-author parade.
-    if author_list_quality(incoming_u) > author_list_quality(existing_u) + 2:
-        return uniq(list(incoming_u) + list(existing_u))
-    return uniq(list(existing_u) + list(incoming_u))
 
 def has_target_author_name(author: str) -> bool:
     """Match Michael L. Platt, but not Jonathan M. Platt or Frances M. Platt."""
@@ -981,6 +1098,7 @@ def main() -> int:
         "source_urls": {"orcid": f"https://orcid.org/{TARGET_ORCID}", "myncbi": MYNCBI_PUBLIC_URL, "google_scholar": GOOGLE_SCHOLAR_PROFILE_URL},
         "counts": {"candidates": len(all_pubs), "merged": len(merged), "published": len(out)},
         "source_counts": source_counts(pubs),
+        "author_strategy": "single_best_source_list_with_fragment_pruning",
     }
     REPORT_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     log(f"Wrote {len(out)} publications to {OUTPUT_FILE}")
