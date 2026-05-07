@@ -53,33 +53,6 @@
     "score": 374
   },
   {
-    "title": "Bite force-gape curves and passive tension costs in Macaca mulatta",
-    "authors": [
-      "Stephanie L. Canington",
-      "Carla Escabi",
-      "Michael L. Platt",
-      "Timothy A. Machado",
-      "Jose Iriarte-Diaz",
-      "Myra F. Laird"
-    ],
-    "authors_display": "Stephanie L. Canington, Carla Escabi, Michael L. Platt, Timothy A. Machado, Jose Iriarte-Diaz, Myra F. Laird",
-    "journal": "Journal of Experimental Biology",
-    "publisher": "The Company of Biologists",
-    "year": 2026,
-    "published_date": "2026-03-06",
-    "doi": "10.1242/jeb.251950",
-    "pmid": "",
-    "pmcid": "",
-    "url": "https://doi.org/10.1242/jeb.251950",
-    "type": "research-article",
-    "thumbnail_url": "",
-    "sources": [
-      "crossref_doi",
-      "orcid"
-    ],
-    "score": 358
-  },
-  {
     "title": "Primate neuroethology: a new synthesis",
     "authors": [
       "Felipe Parodi",
@@ -155,6 +128,33 @@
     "pmcid": "",
     "url": "https://doi.org/10.31234/osf.io/7dakh_v2",
     "type": "preprint",
+    "thumbnail_url": "",
+    "sources": [
+      "crossref_doi",
+      "orcid"
+    ],
+    "score": 358
+  },
+  {
+    "title": "Bite force-gape curves and passive tension costs in Macaca mulatta",
+    "authors": [
+      "Stephanie L. Canington",
+      "Carla Escabi",
+      "Michael L. Platt",
+      "Timothy A. Machado",
+      "Jose Iriarte-Diaz",
+      "Myra F. Laird"
+    ],
+    "authors_display": "Stephanie L. Canington, Carla Escabi, Michael L. Platt, Timothy A. Machado, Jose Iriarte-Diaz, Myra F. Laird",
+    "journal": "Journal of Experimental Biology",
+    "publisher": "The Company of Biologists",
+    "year": 2026,
+    "published_date": "2026-05-01",
+    "doi": "10.1242/jeb.251950",
+    "pmid": "",
+    "pmcid": "",
+    "url": "https://doi.org/10.1242/jeb.251950",
+    "type": "research-article",
     "thumbnail_url": "",
     "sources": [
       "crossref_doi",

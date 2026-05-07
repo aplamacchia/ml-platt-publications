@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-05T08:34:31.665696+00:00",
+  "generated_at": "2026-05-07T09:13:01.051717+00:00",
   "target_author": "Michael L. Platt",
   "target_orcid": "0000-0003-3912-8821",
   "source_urls": {
@@ -8,7 +8,7 @@
     "google_scholar": "https://scholar.google.com/citations?user=U9Hu2rcAAAAJ&hl=en"
   },
   "counts": {
-    "candidates": 865,
+    "candidates": 866,
     "merged": 259,
     "published": 219
   },
