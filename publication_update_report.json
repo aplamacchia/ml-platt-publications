@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-11T11:06:35.298658+00:00",
+  "generated_at": "2026-06-12T10:45:59.832227+00:00",
   "target_author": "Michael L. Platt",
   "target_orcid": "0000-0003-3912-8821",
   "source_urls": {
@@ -8,16 +8,16 @@
     "google_scholar": "https://scholar.google.com/citations?user=U9Hu2rcAAAAJ&hl=en"
   },
   "counts": {
-    "candidates": 871,
-    "merged": 261,
-    "published": 219
+    "candidates": 873,
+    "merged": 262,
+    "published": 220
   },
   "source_counts": {
-    "crossref_doi": 40,
+    "crossref_doi": 41,
     "google_scholar_seed": 1,
     "myncbi": 214,
     "myncbi_pubmed": 204,
-    "orcid": 29,
+    "orcid": 30,
     "pubmed": 204
   },
   "author_strategy": "single_best_source_list_with_fragment_pruning",
