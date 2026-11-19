@@ -80,18 +80,18 @@
     "title": "Mid-superior temporal sulcus encodes spatial context and behavioral state in freely moving macaques",
     "authors": [
       "Felipe Parodi",
-      "Alessandro P Lamacchia",
+      "Alessandro P. Lamacchia",
       "Yufan Ye",
       "Pooya Laamerad",
       "Yiting Chen",
-      "Kristin L Gardiner",
+      "Kristin L. Gardiner",
       "Sebastien Tremblay",
-      "Konrad P Kording",
+      "Konrad P. Kording",
       "Michael L. Platt"
     ],
-    "authors_display": "Felipe Parodi, Alessandro P Lamacchia, Yufan Ye, Pooya Laamerad, Yiting Chen, Kristin L Gardiner, Sebastien Tremblay, Konrad P Kording, Michael L. Platt",
+    "authors_display": "Felipe Parodi, Alessandro P. Lamacchia, Yufan Ye, Pooya Laamerad, Yiting Chen, Kristin L. Gardiner, Sebastien Tremblay, Konrad P. Kording, Michael L. Platt",
     "journal": "bioRxiv",
-    "publisher": "",
+    "publisher": "openRxiv",
     "year": 2026,
     "published_date": "2026-04-01",
     "doi": "10.64898/2026.04.16.719074",
@@ -101,12 +101,13 @@
     "type": "preprint",
     "thumbnail_url": "",
     "sources": [
+      "crossref_doi",
       "google_scholar_seed",
       "myncbi",
       "myncbi_pubmed",
       "pubmed"
     ],
-    "score": 159
+    "score": 248
   },
   {
     "title": "Primate neuroethology: a new synthesis",
@@ -273,10 +274,15 @@
   },
   {
     "title": "Trait anxiety drives premature disengagement despite intact opportunity-cost sensitivity",
-    "authors": [],
-    "authors_display": "",
+    "authors": [
+      "Peeusa Mitra",
+      "Garima Chauhan",
+      "Michael L. Platt",
+      "Arjun Ramakrishnan"
+    ],
+    "authors_display": "Peeusa Mitra, Garima Chauhan, Michael L. Platt, Arjun Ramakrishnan",
     "journal": "bioRxiv",
-    "publisher": "",
+    "publisher": "openRxiv",
     "year": 2026,
     "published_date": "2026-06-24",
     "doi": "10.64898/2026.06.19.733431",
@@ -286,9 +292,10 @@
     "type": "preprint",
     "thumbnail_url": "",
     "sources": [
+      "crossref_doi",
       "orcid"
     ],
-    "score": 88
+    "score": 366
   },
   {
     "title": "Variation in trabecular bone microarchitecture across rhesus macaque (Macaca mulatta) load-bearing joints",
@@ -1327,11 +1334,12 @@
   {
     "title": "Declining human fertility and the epidemic of despair",
     "authors": [
-      "Michael L"
+      "Michael L. Platt",
+      "Peter Sterling"
     ],
-    "authors_display": "Michael L",
+    "authors_display": "Michael L. Platt, Peter Sterling",
     "journal": "Nature Mental Health",
-    "publisher": "",
+    "publisher": "Springer Science and Business Media LLC",
     "year": 2024,
     "published_date": "2024-05-01",
     "doi": "10.1038/s44220-024-00241-1",
@@ -1341,10 +1349,11 @@
     "type": "research-article",
     "thumbnail_url": "",
     "sources": [
+      "crossref_doi",
       "myncbi",
       "orcid"
     ],
-    "score": 112
+    "score": 334
   },
   {
     "title": "Ecological disturbance alters the adaptive benefits of social ties",
