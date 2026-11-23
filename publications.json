@@ -80,18 +80,18 @@
     "title": "Mid-superior temporal sulcus encodes spatial context and behavioral state in freely moving macaques",
     "authors": [
       "Felipe Parodi",
-      "Alessandro P Lamacchia",
+      "Alessandro P. Lamacchia",
       "Yufan Ye",
       "Pooya Laamerad",
       "Yiting Chen",
-      "Kristin L Gardiner",
+      "Kristin L. Gardiner",
       "Sebastien Tremblay",
-      "Konrad P Kording",
+      "Konrad P. Kording",
       "Michael L. Platt"
     ],
-    "authors_display": "Felipe Parodi, Alessandro P Lamacchia, Yufan Ye, Pooya Laamerad, Yiting Chen, Kristin L Gardiner, Sebastien Tremblay, Konrad P Kording, Michael L. Platt",
+    "authors_display": "Felipe Parodi, Alessandro P. Lamacchia, Yufan Ye, Pooya Laamerad, Yiting Chen, Kristin L. Gardiner, Sebastien Tremblay, Konrad P. Kording, Michael L. Platt",
     "journal": "bioRxiv",
-    "publisher": "",
+    "publisher": "openRxiv",
     "year": 2026,
     "published_date": "2026-04-01",
     "doi": "10.64898/2026.04.16.719074",
@@ -101,12 +101,13 @@
     "type": "preprint",
     "thumbnail_url": "",
     "sources": [
+      "crossref_doi",
       "google_scholar_seed",
       "myncbi",
       "myncbi_pubmed",
       "pubmed"
     ],
-    "score": 159
+    "score": 248
   },
   {
     "title": "Primate neuroethology: a new synthesis",
@@ -2379,15 +2380,15 @@
   {
     "title": "Neurons in primate prefrontal cortex signal valuable social information during natural viewing",
     "authors": [
-      "Geoffrey K Adams",
+      "Geoffrey K. Adams",
       "Wei Song Ong",
-      "John M Pearson",
-      "Karli K Watson",
+      "John M. Pearson",
+      "Karli K. Watson",
       "Michael L. Platt"
     ],
-    "authors_display": "Geoffrey K Adams, Wei Song Ong, John M Pearson, Karli K Watson, Michael L. Platt",
+    "authors_display": "Geoffrey K. Adams, Wei Song Ong, John M. Pearson, Karli K. Watson, Michael L. Platt",
     "journal": "Philosophical transactions of the Royal Society of London. Series B, Biological sciences",
-    "publisher": "",
+    "publisher": "The Royal Society",
     "year": 2021,
     "published_date": "2021-03-01",
     "doi": "10.1098/rstb.2019.0666",
@@ -2397,12 +2398,13 @@
     "type": "research-article",
     "thumbnail_url": "",
     "sources": [
+      "crossref_doi",
       "myncbi",
       "myncbi_pubmed",
       "orcid",
       "pubmed"
     ],
-    "score": 167
+    "score": 406
   },
   {
     "title": "Development of a Severity Score and Comparison With Validated Measures for Depression and Anxiety: Validation Study (Preprint)",
