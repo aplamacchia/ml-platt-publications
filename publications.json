@@ -80,18 +80,18 @@
     "title": "Mid-superior temporal sulcus encodes spatial context and behavioral state in freely moving macaques",
     "authors": [
       "Felipe Parodi",
-      "Alessandro P Lamacchia",
+      "Alessandro P. Lamacchia",
       "Yufan Ye",
       "Pooya Laamerad",
       "Yiting Chen",
-      "Kristin L Gardiner",
+      "Kristin L. Gardiner",
       "Sebastien Tremblay",
-      "Konrad P Kording",
+      "Konrad P. Kording",
       "Michael L. Platt"
     ],
-    "authors_display": "Felipe Parodi, Alessandro P Lamacchia, Yufan Ye, Pooya Laamerad, Yiting Chen, Kristin L Gardiner, Sebastien Tremblay, Konrad P Kording, Michael L. Platt",
+    "authors_display": "Felipe Parodi, Alessandro P. Lamacchia, Yufan Ye, Pooya Laamerad, Yiting Chen, Kristin L. Gardiner, Sebastien Tremblay, Konrad P. Kording, Michael L. Platt",
     "journal": "bioRxiv",
-    "publisher": "",
+    "publisher": "openRxiv",
     "year": 2026,
     "published_date": "2026-04-01",
     "doi": "10.64898/2026.04.16.719074",
@@ -101,12 +101,13 @@
     "type": "preprint",
     "thumbnail_url": "",
     "sources": [
+      "crossref_doi",
       "google_scholar_seed",
       "myncbi",
       "myncbi_pubmed",
       "pubmed"
     ],
-    "score": 159
+    "score": 248
   },
   {
     "title": "Primate neuroethology: a new synthesis",
@@ -2026,7 +2027,7 @@
     ],
     "authors_display": "Marina M Watowich, Kenneth L Chiou, Michael J Montague, Cayo Biobank Research Unit, Noah D Simons, Julie E Horvath, Angelina V Ruiz-Lambides, Melween I Martínez, James P Higham, Lauren J N Brent, Michael L. Platt, Noah Snyder-Mackler",
     "journal": "Proceedings of the National Academy of Sciences of the United States of America",
-    "publisher": "National Academy of Sciences",
+    "publisher": "",
     "year": 2022,
     "published_date": "2022-02-01",
     "doi": "10.1073/pnas.2121663119",
@@ -2036,13 +2037,12 @@
     "type": "research-article",
     "thumbnail_url": "",
     "sources": [
-      "crossref_doi",
       "myncbi",
       "myncbi_pubmed",
       "orcid",
       "pubmed"
     ],
-    "score": 350
+    "score": 128
   },
   {
     "title": "Platt, Zhaoying Chen, Elizabeth M",
